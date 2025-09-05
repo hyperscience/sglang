@@ -443,6 +443,10 @@ class LoRAManager:
             if self.should_skip_lora_for_vision_model(module_name):
                 continue
 
+            if module_name.startswith('visual'):
+                # skip visual attention layers
+                continue
+
             # The module should be converted if it is included in target_names
             if module_name.split(".")[-1] in self.target_modules:
                 layer_id = get_layer_id(module_name)
