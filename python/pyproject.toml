@@ -30,6 +30,7 @@ runtime_common = [
     "modelscope",
     "msgspec",
     "ninja",
+    "openai==1.90.0",  # import at runtime
     "openai-harmony==0.0.4",
     "orjson",
     "packaging",
