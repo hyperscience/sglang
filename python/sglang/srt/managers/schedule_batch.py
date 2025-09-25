@@ -462,6 +462,7 @@ class Req:
         extra_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
+        output_attention_scores: bool = False,
     ):
         # Input and output info
         self.rid = rid
@@ -686,6 +687,8 @@ class Req:
         self.dllm_ids = []
         self.dllm_block_offset = 0
         self.dllm_config = dllm_config
+
+        self.output_attention_scores: bool = output_attention_scores
 
     @property
     def seqlen(self) -> int:

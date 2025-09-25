@@ -227,6 +227,8 @@ class GenerateReqInput(BaseReq):
     # Whether to return entropy
     return_entropy: bool = False
 
+    output_attention_scores: bool = False
+
     def contains_mm_input(self) -> bool:
         return (
             has_valid_data(self.image_data)
@@ -628,6 +630,7 @@ class GenerateReqInput(BaseReq):
             return_bytes=self.return_bytes,
             return_entropy=self.return_entropy,
             http_worker_ipc=self.http_worker_ipc,
+            output_attention_scores=self.output_attention_scores[i],
         )
 
 
@@ -696,6 +699,7 @@ class TokenizedGenerateReqInput(BaseReq):
     # Whether to return entropy
     return_entropy: bool = False
 
+    output_attention_scores: bool = False,
 
 @dataclass
 class BatchTokenizedGenerateReqInput(BaseBatchReq):

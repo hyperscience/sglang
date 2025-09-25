@@ -1318,6 +1318,7 @@ class Scheduler(
                 ),
                 http_worker_ipc=recv_req.http_worker_ipc,
                 dllm_config=self.dllm_config,
+                output_attention_scores=recv_req.output_attention_scores,
             )
             req.tokenizer = self.tokenizer
 
