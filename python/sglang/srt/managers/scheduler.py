@@ -1312,6 +1312,7 @@ class Scheduler(
                 metrics_collector=(
                     self.metrics_collector if self.enable_metrics else None
                 ),
+                output_attention_scores=recv_req.output_attention_scores,
             )
             req.tokenizer = self.tokenizer
 

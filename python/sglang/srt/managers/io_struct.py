@@ -169,6 +169,8 @@ class GenerateReqInput(BaseReq):
     # (Internal) Whether to return bytes for image generation
     return_bytes: bool = False
 
+    output_attention_scores: bool = False
+
     def contains_mm_input(self) -> bool:
         return (
             has_valid_data(self.image_data)
@@ -567,6 +569,7 @@ class GenerateReqInput(BaseReq):
             no_logs=self.no_logs,
             custom_labels=self.custom_labels,
             return_bytes=self.return_bytes,
+            output_attention_scores=self.output_attention_scores[i],
         )
 
 
@@ -632,6 +635,7 @@ class TokenizedGenerateReqInput(BaseReq):
     # (Internal) Whether to return bytes for image generation
     return_bytes: bool = False
 
+    output_attention_scores: bool = False,
 
 @dataclass
 class BatchTokenizedGenerateReqInput(BaseBatchReq):
