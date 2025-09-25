@@ -463,6 +463,7 @@ class Req:
         extra_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
+        output_attention_scores: bool = False,
     ):
         # Input and output info
         self.rid = rid
@@ -680,6 +681,8 @@ class Req:
 
         # For Matryoshka embeddings
         self.dimensions = dimensions
+
+        self.output_attention_scores: bool = output_attention_scores
 
     @property
     def seqlen(self):

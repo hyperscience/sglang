@@ -185,6 +185,7 @@ class Engine(EngineBase):
         bootstrap_room: Optional[Union[List[int], int]] = None,
         data_parallel_rank: Optional[int] = None,
         rid: Optional[Union[List[str], str]] = None,
+        output_attention_scores: bool = False,
     ) -> Union[Dict, Iterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -220,6 +221,7 @@ class Engine(EngineBase):
             bootstrap_room=bootstrap_room,
             data_parallel_rank=data_parallel_rank,
             rid=rid,
+            output_attention_scores=output_attention_scores,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
