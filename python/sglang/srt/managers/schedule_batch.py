@@ -434,6 +434,7 @@ class Req:
         bootstrap_room: Optional[int] = None,
         data_parallel_rank: Optional[int] = None,
         vocab_size: Optional[int] = None,
+        output_attention_scores: bool = False,
     ):
         # Input and output info
         self.rid = rid
@@ -614,6 +615,8 @@ class Req:
         # We use `tmp_end_idx` to store the end index of the kv cache to send.
         self.tmp_end_idx: int = -1
         self.metadata_buffer_index: int = -1
+
+        self.output_attention_scores: bool = output_attention_scores
 
     @property
     def seqlen(self):

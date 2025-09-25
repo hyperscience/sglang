@@ -182,7 +182,7 @@ class Qwen2Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, q[-1:, ...]
 
 
 class Qwen2DecoderLayer(nn.Module):
@@ -241,7 +241,7 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
+        hidden_states, q = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
@@ -250,7 +250,7 @@ class Qwen2DecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        return hidden_states, residual, q
 
 
 class Qwen2Model(nn.Module):
@@ -302,6 +302,18 @@ class Qwen2Model(nn.Module):
         # For EAGLE3 support
         self.layers_to_capture = []
 
+        # this will store the queries for the current token
+        self.register_buffer(
+            'query_buffer',
+            torch.zeros(
+                # 3584 hidden_size = 28 heads * 128 head dim
+                (config.num_hidden_layers, 1, config.hidden_size),
+                dtype=config.torch_dtype,
+                device=torch.cuda.current_device(),
+            ),
+            persistent=False,
+        )
+
     def get_input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
         if hasattr(self.config, "scale_emb"):
             return self.get_input_embeddings()(input_ids) * self.config.scale_emb
@@ -337,12 +349,15 @@ class Qwen2Model(nn.Module):
                     hidden_states + residual if residual is not None else hidden_states
                 )
             layer = self.layers[i]
-            hidden_states, residual = layer(
+            hidden_states, residual, q = layer(
                 positions,
                 hidden_states,
                 forward_batch,
                 residual,
             )
+            # we will store the current token queries during decoding
+            if forward_batch.forward_mode.is_decode():
+                self.query_buffer[i] = q
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
                 {
