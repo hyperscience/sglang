@@ -8,6 +8,7 @@ import torch
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
+from sglang.srt.hs.attention_heatmap import GB, aggregate_attentions, compute_attn_weights, get_query_buffer_gb
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -22,6 +23,10 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.tracing.trace import trace_slice, trace_slice_batch, trace_slice_end
+from sglang.srt.model_executor.model_runner import (
+    clean_global_output_token_query,
+    get_global_output_token_query_buffer,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
@@ -333,6 +338,44 @@ class SchedulerOutputProcessorMixin:
             req.check_finished(new_accepted_len)
 
             if req.finished():
+                if req.output_attention_scores:
+                    start_time = time.perf_counter()
+                    assert not req.return_hidden_states, 'Cannot return both hidden states and attention heatmap.'
+                    
+                    # Track GPU memory before computation
+                    torch.cuda.reset_peak_memory_stats()
+                    mem_before = torch.cuda.memory_allocated() / GB
+                    
+                    query_buffer = get_global_output_token_query_buffer()
+                    # indices of prompt tokens in the kv cache
+                    prompt_token_indices = self.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, : len(req.origin_input_ids)
+                    ].tolist()
+                    layers_attn_weights = compute_attn_weights(
+                        self.token_to_kv_pool_allocator._kvcache.k_buffer,
+                        query_buffer, 
+                        prompt_token_indices,
+                        self.page_size
+                    )
+                    flattened_attention_all_tokens = list(map(aggregate_attentions, layers_attn_weights))
+                    req.hidden_states = flattened_attention_all_tokens
+                    
+                    # Track peak GPU memory usage
+                    peak_mem = torch.cuda.max_memory_allocated() / GB
+                    peak_increase = peak_mem - mem_before
+                    
+                    f = (
+                        f"Compute attention scores, "
+                        f"#input-token: {len(prompt_token_indices)}, "
+                        f"#output-token: {len(query_buffer)}, "
+                        f"query-buffer: {get_query_buffer_gb(query_buffer):.3f} GB, "
+                        f"VRAM-peak-increase: {peak_increase:.3f} GB, "
+                        f"time: {time.perf_counter() - start_time:.3f} s, "
+                    )
+                    logger.info(f)
+
+                clean_global_output_token_query()
+            
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
                     # Asynchronously offload KV cache; release_kv_cache will be called after Device->Host transfer completes
                     if not self.decode_offload_manager.offload_kv_cache(req):
@@ -360,12 +403,7 @@ class SchedulerOutputProcessorMixin:
                     req.output_token_ids_logprobs_idx.append(
                         logits_output.next_token_token_ids_logprobs_idx[i]
                     )
-
-            if req.return_hidden_states and logits_output.hidden_states is not None:
-                req.hidden_states.append(
-                    logits_output.hidden_states[i].cpu().clone().tolist()
-                )
-
+            
             if req.grammar is not None and batch.spec_algorithm.is_none():
                 # FIXME: this try-except block is for handling unexpected xgrammar issue.
                 try:
@@ -907,10 +945,9 @@ class SchedulerOutputProcessorMixin:
                         output_token_ids_logprobs_val.append([])
                         output_token_ids_logprobs_idx.append([])
 
-                if req.return_hidden_states:
-                    if output_hidden_states is None:
-                        output_hidden_states = []
-                    output_hidden_states.append(req.hidden_states)
+                if output_hidden_states is None:
+                    output_hidden_states = []
+                output_hidden_states.append(req.hidden_states)
 
             if (
                 req.finished()
