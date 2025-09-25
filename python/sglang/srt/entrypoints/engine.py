@@ -36,7 +36,6 @@ setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 
 import torch
 import uvloop
-
 from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.managers.data_parallel_controller import (
     run_data_parallel_controller_process,
@@ -185,6 +184,8 @@ class Engine(EngineBase):
         bootstrap_room: Optional[Union[List[int], int]] = None,
         data_parallel_rank: Optional[int] = None,
         rid: Optional[Union[List[str], str]] = None,
+        output_attention_weights: bool = False,
+        chunked_attention_compute_size: Optional[int] = None,
     ) -> Union[Dict, Iterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -220,6 +221,8 @@ class Engine(EngineBase):
             bootstrap_room=bootstrap_room,
             data_parallel_rank=data_parallel_rank,
             rid=rid,
+            output_attention_weights=output_attention_weights,
+            chunked_attention_compute_size=chunked_attention_compute_size,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
@@ -267,6 +270,8 @@ class Engine(EngineBase):
         bootstrap_room: Optional[Union[List[int], int]] = None,
         data_parallel_rank: Optional[int] = None,
         rid: Optional[Union[List[str], str]] = None,
+        output_attention_weights: bool = False,
+        chunked_attention_compute_size: Optional[int] = None,
     ) -> Union[Dict, AsyncIterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -280,7 +285,7 @@ class Engine(EngineBase):
                 raise ValueError("data_parallel_rank must be non-negative")
             elif data_parallel_rank >= self.server_args.dp_size:
                 raise ValueError(
-                    f"data_parallel_rank must be in range [0, {self.server_args.dp_size-1}]"
+                    f"data_parallel_rank must be in range [0, {self.server_args.dp_size - 1}]"
                 )
 
         logger.debug(f"data_parallel_rank: {data_parallel_rank}")
@@ -304,6 +309,8 @@ class Engine(EngineBase):
             bootstrap_room=bootstrap_room,
             data_parallel_rank=data_parallel_rank,
             rid=rid,
+            output_attention_weights=output_attention_weights,
+            chunked_attention_compute_size=chunked_attention_compute_size,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 

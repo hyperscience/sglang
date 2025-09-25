@@ -47,7 +47,6 @@ from typing import TYPE_CHECKING, Any, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
-
 from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
 from sglang.srt.disaggregation.base import BaseKVSender
 from sglang.srt.disaggregation.decode_schedule_batch_mixin import (
@@ -75,7 +74,6 @@ from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sglang.srt.metrics.collector import SchedulerMetricsCollector, TimeStats
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
-    ForwardBatch,
     ForwardMode,
 )
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
@@ -463,6 +461,8 @@ class Req:
         extra_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
+        output_attention_weights: bool = False,
+        chunked_attention_compute_size: Optional[int] = None,
     ):
         # Input and output info
         self.rid = rid
@@ -680,6 +680,11 @@ class Req:
 
         # For Matryoshka embeddings
         self.dimensions = dimensions
+
+        self.output_attention_weights: bool = output_attention_weights
+        self.chunked_attention_compute_size: Optional[int] = (
+            chunked_attention_compute_size
+        )
 
     @property
     def seqlen(self):
