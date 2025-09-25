@@ -32,13 +32,13 @@ from http import HTTPStatus
 from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 
 import fastapi
+
 import orjson
 import torch
 import uvloop
 import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
-
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.lora.lora_registry import LoRARegistry
@@ -817,6 +817,8 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 data_parallel_rank=obj.data_parallel_rank,
                 priority=obj.priority,
                 extra_key=obj.extra_key,
+                output_attention_weights=obj.output_attention_weights,
+                chunked_attention_compute_size=obj.chunked_attention_compute_size,
             )
         elif isinstance(obj, EmbeddingReqInput):
             tokenized_obj = TokenizedEmbeddingReqInput(
@@ -1528,7 +1530,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 )
 
             if getattr(recv_obj, "output_hidden_states", None):
-                meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
+                meta_info["attention_weights"] = recv_obj.output_hidden_states[i]
 
             if isinstance(recv_obj, BatchStrOutput):
                 state.text += recv_obj.output_strs[i]

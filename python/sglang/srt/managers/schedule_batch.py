@@ -463,6 +463,8 @@ class Req:
         extra_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
+        output_attention_weights: bool = False,
+        chunked_attention_compute_size: Optional[int] = None,
     ):
         # Input and output info
         self.rid = rid
@@ -680,6 +682,11 @@ class Req:
 
         # For Matryoshka embeddings
         self.dimensions = dimensions
+
+        self.output_attention_weights: bool = output_attention_weights
+        self.chunked_attention_compute_size: Optional[int] = (
+            chunked_attention_compute_size
+        )
 
     @property
     def seqlen(self):

@@ -1293,6 +1293,8 @@ class Scheduler(
                     self.metrics_collector if self.enable_metrics else None
                 ),
                 http_worker_ipc=recv_req.http_worker_ipc,
+                output_attention_weights=recv_req.output_attention_weights,
+                chunked_attention_compute_size=recv_req.chunked_attention_compute_size,
             )
             req.tokenizer = self.tokenizer
 
