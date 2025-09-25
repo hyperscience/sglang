@@ -6,9 +6,14 @@ import time
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
+from sglang.srt.hs.attention_heatmap import aggregate_attentions, compute_attn_weights
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import AbortReq, BatchEmbeddingOut, BatchTokenIDOut
 from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
+from sglang.srt.model_executor.model_runner import (
+    clean_global_output_token_query,
+    get_global_output_token_query_buffer,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
@@ -247,6 +252,23 @@ class SchedulerOutputProcessorMixin:
                 self.tree_cache.cache_finished_req(req)
                 req.time_stats.completion_time = time.time()
 
+                if req.output_attention_scores:
+                    assert not req.return_hidden_states, 'Cannot return both hidden states and attention heatmap.'
+                    query_buffer = get_global_output_token_query_buffer()
+                    # indices of prompt tokens in the kv cache
+                    prompt_token_indices = self.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, : len(req.origin_input_ids)
+                    ].tolist()
+                    layers_attn_weights = compute_attn_weights(
+                        self.token_to_kv_pool_allocator._kvcache.k_buffer,
+                        query_buffer, 
+                        prompt_token_indices,
+                        self.page_size
+                    )
+                    flattened_attention_all_tokens = list(map(aggregate_attentions, layers_attn_weights))
+                    req.hidden_states = flattened_attention_all_tokens
+                clean_global_output_token_query()
+
             if req.return_logprob and batch.spec_algorithm.is_none():
                 # speculative worker handles logprob in speculative decoding
                 req.output_token_logprobs_val.append(next_token_logprobs[i])
@@ -265,12 +287,7 @@ class SchedulerOutputProcessorMixin:
                     req.output_token_ids_logprobs_idx.append(
                         logits_output.next_token_token_ids_logprobs_idx[i]
                     )
-
-            if req.return_hidden_states and logits_output.hidden_states is not None:
-                req.hidden_states.append(
-                    logits_output.hidden_states[i].cpu().clone().tolist()
-                )
-
+            
             if req.grammar is not None and batch.spec_algorithm.is_none():
                 # FIXME: this try-except block is for handling unexpected xgrammar issue.
                 try:
@@ -653,10 +670,9 @@ class SchedulerOutputProcessorMixin:
                         output_token_ids_logprobs_val.append([])
                         output_token_ids_logprobs_idx.append([])
 
-                if req.return_hidden_states:
-                    if output_hidden_states is None:
-                        output_hidden_states = []
-                    output_hidden_states.append(req.hidden_states)
+                if output_hidden_states is None:
+                    output_hidden_states = []
+                output_hidden_states.append(req.hidden_states)
 
             if (
                 req.finished()

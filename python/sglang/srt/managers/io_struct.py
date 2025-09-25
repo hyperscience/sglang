@@ -128,6 +128,8 @@ class GenerateReqInput:
     # For background responses (OpenAI responses API)
     background: bool = False
 
+    output_attention_scores: bool = False
+
     def contains_mm_input(self) -> bool:
         return (
             has_valid_data(self.image_data)
@@ -479,6 +481,7 @@ class GenerateReqInput:
             data_parallel_rank=(
                 self.data_parallel_rank if self.data_parallel_rank is not None else None
             ),
+            output_attention_scores=self.output_attention_scores[i],
         )
 
 
@@ -532,6 +535,7 @@ class TokenizedGenerateReqInput:
     # For dp balance
     dp_balance_id: int = -1
 
+    output_attention_scores: bool = False,
 
 @dataclass
 class EmbeddingReqInput:
