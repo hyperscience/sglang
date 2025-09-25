@@ -217,6 +217,19 @@ if _is_npu:
     torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
+# store the query for each decoded token
+GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER = []
+
+
+def get_global_output_token_query_buffer():
+    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+    return GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+
+def clean_global_output_token_query():
+    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+    GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER = []
+
+
 class RankZeroFilter(logging.Filter):
     """Filter that only allows INFO level logs from rank 0, but allows all other levels from any rank."""
 
@@ -2227,6 +2240,8 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
+        global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+        
         mode_check = (
             forward_batch.forward_mode.is_cpu_graph
             if self.device == "cpu"
@@ -2244,6 +2259,12 @@ class ModelRunner:
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.append(
+                [
+                    layer_query_buffer.clone()
+                    for layer_query_buffer in self.model.model.query_buffer
+                ]
+            )
             return ret, can_run_graph
 
         # For MLP sync
@@ -2255,6 +2276,12 @@ class ModelRunner:
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
+            )
+            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.append(
+                [
+                    layer_query_buffer.clone()
+                    for layer_query_buffer in self.model.model.query_buffer
+                ]
             )
         elif forward_batch.forward_mode.is_extend():
             ret = self.forward_extend(
