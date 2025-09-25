@@ -1032,13 +1032,46 @@ class Qwen3LLMModel(Qwen3Model):
             deepstack_embeds = self.get_deepstack_embeds(
                 layer_idx - 1, input_deepstack_embeds
             )
-            hidden_states, residual = layer(
+            hidden_states, residual, q = layer(
                 positions,
                 hidden_states,
                 forward_batch,
                 residual,
                 post_residual_addition=deepstack_embeds,
             )
+
+            # Only record queries for layers within the attention heatmap range.
+            if self.attention_heatmap_layer_start <= layer_idx < self.attention_heatmap_layer_end:
+                assert not forward_batch.forward_mode.is_mixed(), (
+                    "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
+                )
+
+                batch_size = forward_batch.batch_size
+                buffer_idx = layer_idx - self.attention_heatmap_layer_start
+                assert batch_size <= self.query_buffer.shape[1], 'Batch size exceeds query buffer capacity.'
+
+                if forward_batch.forward_mode.is_decode():
+                    """Decode mode: generating a single token for each request in the batch.
+                    We record the query used to generate the token for each request in the batch.
+                    q: torch.Tensor of shape [batch_size, hidden_size]"""
+                    assert q.ndim == 2 and q.shape == (batch_size, self.config.hidden_size)
+                    self.query_buffer[buffer_idx][:batch_size] = q
+
+                elif forward_batch.forward_mode.is_extend():
+                    """Extend mode: prefilling multiple requests together.
+                    q: torch.Tensor of shape [total_extend_tokens, hidden_size]
+                    We record the query for the last token of each request in the batch,
+                    as the query for the last token of the prompt will be used to generate the first output token."""
+                    extend_seq_lens = forward_batch.extend_seq_lens_cpu
+                    assert extend_seq_lens is not None
+                    assert len(extend_seq_lens) == batch_size
+                    assert q.ndim == 2 and q.shape == (sum(extend_seq_lens), self.config.hidden_size)
+
+                    req_last_token_idx = -1
+                    for req_idx, extend_len in enumerate(extend_seq_lens):
+                        req_last_token_idx += extend_len
+                        self.query_buffer[buffer_idx, req_idx] = q[req_last_token_idx]
+
 
         # Handle deepstack for the last processed layer if it exists.
         last_deepstack = self.get_deepstack_embeds(

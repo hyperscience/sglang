@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
-
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
+from sglang.srt.hs.attention_heatmap import (
+    MiB,
+    OUTPUT_TOKEN_QUERY_BUFFER,
+    aggregate_attentions,
+    compute_attn_weights_for_request,
+    get_req_query_buffer_mb,
+    maybe_drop_extra_query_due_to_overlap_scheduling,
+)
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.moe.routed_experts_capturer import get_global_experts_capturer
 from sglang.srt.managers.io_struct import (
@@ -567,6 +575,74 @@ class SchedulerOutputProcessorMixin:
             self.decode_offload_manager.offload_kv_cache(req)
 
         if req.finished():
+            if req.output_attention_weights:
+                start_time = time.perf_counter()
+                assert not req.return_hidden_states, (
+                    "Cannot return both hidden states and attention heatmap."
+                )
+
+                maybe_drop_extra_query_due_to_overlap_scheduling(
+                    req_rid=req.rid, 
+                    req_num_output_tokens=len(req.output_ids)
+                )
+
+
+                # Track GPU memory before computation
+                torch.cuda.reset_peak_memory_stats()
+                alloc_before = torch.cuda.memory_allocated() / MiB
+                reserved_before = torch.cuda.memory_reserved() / MiB
+
+                req_query_buffer = OUTPUT_TOKEN_QUERY_BUFFER.pop(req.rid).queries
+                assert len(req_query_buffer) == len(req.output_ids)
+                query_buffer_mb = get_req_query_buffer_mb(req_query_buffer)
+
+                # Indices of request prompt tokens in the KV cache
+                req_prompt_token_indices = self.req_to_token_pool.req_to_token[
+                    req.req_pool_idx, : len(req.origin_input_ids)
+                ].tolist()
+
+                layers_attn_weights = compute_attn_weights_for_request(
+                    key_cache_buffer=self.token_to_kv_pool_allocator._kvcache.k_buffer,
+                    req_query_buffer=req_query_buffer,
+                    req_prompt_token_indices=req_prompt_token_indices,
+                    page_size=self.page_size,
+                    chunked_attention_heatmap_size=self.server_args.chunked_attention_heatmap_size,
+                    attention_heatmap_layer_start=self.server_args.attention_heatmap_layer_start or 0,
+                    attention_heatmap_layer_end=self.server_args.attention_heatmap_layer_end or len(self.token_to_kv_pool_allocator._kvcache.k_buffer),
+                )
+                flattened_attention_all_tokens = list(
+                    map(aggregate_attentions, layers_attn_weights)
+                )
+                req.hidden_states = flattened_attention_all_tokens
+
+                # Track peak GPU memory usage
+                peak_alloc = torch.cuda.max_memory_allocated() / MiB
+                peak_reserved = torch.cuda.max_memory_reserved() / MiB
+                peak_alloc_increase = max(0.0, peak_alloc - alloc_before)
+                peak_reserved_increase = max(0.0, peak_reserved - reserved_before)
+
+                f = (
+                    f"Compute attention weights, "
+                    f"#input-token: {len(req_prompt_token_indices)}, "
+                    f"#output-token: {len(req.output_ids)}, "
+                    f"layer-range: [{self.server_args.attention_heatmap_layer_start or 0}, {self.server_args.attention_heatmap_layer_end or len(self.token_to_kv_pool_allocator._kvcache.k_buffer)}), "
+                    f"chunk-size: {self.server_args.chunked_attention_heatmap_size}, "
+                    f"query-buffer: {int(query_buffer_mb)} MiB, "
+                    f"VRAM-alloc-peak-increase: {int(peak_alloc_increase)} MiB, "
+                    f"VRAM-reserved-peak-increase: {int(peak_reserved_increase)} MiB, "
+                    f"time: {time.perf_counter() - start_time:.3f} s, "
+                )
+                logger.info(f)
+
+                # Explicitly release temporary references after finishing computation.
+                del req_query_buffer
+                del req_prompt_token_indices
+                del layers_attn_weights
+                del flattened_attention_all_tokens
+
+            if req.rid in OUTPUT_TOKEN_QUERY_BUFFER:
+                del OUTPUT_TOKEN_QUERY_BUFFER[req.rid]
+
             # delete feature to save memory
             if req.multimodal_inputs is not None and req.session is None:
                 req.multimodal_inputs.release_features()
@@ -1152,10 +1228,9 @@ class SchedulerOutputProcessorMixin:
                         output_token_ids_logprobs_val.append([])
                         output_token_ids_logprobs_idx.append([])
 
-                if req.return_hidden_states:
-                    if output_hidden_states is None:
-                        output_hidden_states = []
-                    output_hidden_states.append(req.hidden_states)
+                if output_hidden_states is None:
+                    output_hidden_states = []
+                output_hidden_states.append(req.hidden_states)
                 if req.return_routed_experts:
                     if routed_experts is None:
                         routed_experts = []

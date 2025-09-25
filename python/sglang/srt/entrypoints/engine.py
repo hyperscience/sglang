@@ -317,6 +317,7 @@ class Engine(EngineScoreMixin, EngineBase):
         rid: Optional[Union[List[str], str]] = None,
         session_params: Optional[Dict] = None,
         priority: Optional[int] = None,
+        output_attention_weights: bool = False,
     ) -> Union[Dict, Iterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -351,6 +352,7 @@ class Engine(EngineScoreMixin, EngineBase):
             rid=rid,
             session_params=session_params,
             priority=priority,
+            output_attention_weights=output_attention_weights,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
@@ -407,6 +409,7 @@ class Engine(EngineScoreMixin, EngineBase):
         rid: Optional[Union[List[str], str]] = None,
         session_params: Optional[Dict] = None,
         priority: Optional[int] = None,
+        output_attention_weights: bool = False,
     ) -> Union[Dict, AsyncIterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -441,6 +444,7 @@ class Engine(EngineScoreMixin, EngineBase):
             rid=rid,
             session_params=session_params,
             priority=priority,
+            output_attention_weights=output_attention_weights,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
