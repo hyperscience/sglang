@@ -216,6 +216,18 @@ MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO = 3
 
 logger = logging.getLogger(__name__)
 
+# store the query for each decoded token
+GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER = []
+
+
+def get_global_output_token_query_buffer():
+    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+    return GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+
+def clean_global_output_token_query():
+    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+    GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER = []
+
 if _is_npu:
     import torch_npu
 
@@ -2206,6 +2218,8 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
+        global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
+        
         mode_check = (
             forward_batch.forward_mode.is_cpu_graph
             if self.device == "cpu"
@@ -2223,6 +2237,12 @@ class ModelRunner:
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.append(
+                [
+                    layer_query_buffer.clone()
+                    for layer_query_buffer in self.model.model.query_buffer
+                ]
+            )
             return ret, can_run_graph
 
         # For MLP sync
@@ -2236,6 +2256,12 @@ class ModelRunner:
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
+            )
+            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.append(
+                [
+                    layer_query_buffer.clone()
+                    for layer_query_buffer in self.model.model.query_buffer
+                ]
             )
         elif forward_batch.forward_mode.is_split_prefill():
             ret = self.forward_split_prefill(
