@@ -27,7 +27,6 @@ from typing import Dict, List, Literal, Optional, Union
 import orjson
 
 from sglang.srt.connector import ConnectorType
-from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.utils import (
@@ -2201,14 +2200,6 @@ class ServerArgs:
             choices=list(ReasoningParser.DetectorMap.keys()),
             default=ServerArgs.reasoning_parser,
             help=f"Specify the parser for reasoning models, supported parsers are: {list(ReasoningParser.DetectorMap.keys())}.",
-        )
-        tool_call_parser_choices = list(FunctionCallParser.ToolCallParserEnum.keys())
-        parser.add_argument(
-            "--tool-call-parser",
-            type=str,
-            choices=tool_call_parser_choices,
-            default=ServerArgs.tool_call_parser,
-            help=f"Specify the parser for handling tool-call interactions. Options include: {tool_call_parser_choices}.",
         )
         parser.add_argument(
             "--sampling-defaults",
