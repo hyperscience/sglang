@@ -2,9 +2,14 @@
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# To build a new wheel, delete (if necessary) build/ and dist/, update the version below and run:
+# pip install build
+# python -m build --wheel
+# this creates a new wheel file under dist/
+
 [project]
 name = "sglang"
-version = "0.5.6"
+version = "0.5.6+hs0"
 description = "SGLang is a fast serving framework for large language models and vision language models."
 readme = "README.md"
 requires-python = ">=3.10"
