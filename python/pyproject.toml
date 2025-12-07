@@ -44,7 +44,7 @@ cpu = [
   "ninja",
   "numpy",
   "openai-harmony==0.0.4",
-  "openai==1.99.1",
+  "openai",  # relaxed version to have a single version for both [cpu] and [gpu] and use the one pinned in our repo
   "orjson",
   "outlines==0.1.11",
   "packaging",
@@ -63,16 +63,17 @@ cpu = [
   "setproctitle",
   "soundfile==0.13.1",
   "tiktoken",
-  "timm==1.0.16",
+#  "timm==1.0.16", -> irrelevant and older version than the one in our repo (1.0.22)
   "torchao==0.9.0",
   "tqdm",
   "transformers==4.57.1",
   "uvicorn",
   "uvloop",
-  "xgrammar==0.1.27",
-  "grpcio==1.75.1", # keep it align with compile_proto.py
-  "grpcio-tools==1.75.1", # keep it align with compile_proto.py
-  "grpcio-reflection==1.75.1", # required by srt/entrypoints/grpc_server.py
+#  "xgrammar==0.1.27", -> irrelevant and causing dep issues
+  # the following depend on protobuf<7.0.0 and >=6.31.1
+#  "grpcio==1.75.1", # keep it align with compile_proto.py
+#  "grpcio-tools==1.75.1", # keep it align with compile_proto.py
+#  "grpcio-reflection==1.75.1", # required by srt/entrypoints/grpc_server.py -> irrelevant and depends on protobuf<7.0.0 and >=6.31.1
 ]
 
 gpu = [
@@ -102,7 +103,7 @@ gpu = [
   "nvidia-cutlass-dsl==4.2.1",
   "nvidia-ml-py",
   "openai-harmony==0.0.4",
-  "openai==2.6.1",
+  "openai",  # relaxed version to have a single version for both [cpu] and [gpu] and use the one pinned in our repo
   "orjson",
   "outlines==0.1.11",
   "packaging",
@@ -122,10 +123,10 @@ gpu = [
   "sgl-kernel==0.3.18.post3",
   "soundfile==0.13.1",
   "tiktoken",
-  "timm==1.0.16",
+#  "timm==1.0.16", -> irrelevant and older version than the one in our repo (1.0.22)
   "torch_memory_saver==0.0.9",
-  "torch==2.9.1",
-  "torchaudio==2.9.1",
+  "torch==2.8.0",  # to align with version in our repo
+  "torchaudio==2.8.0",  # to align with version in our repo
   "torchcodec==0.7.0 ; sys_platform != 'linux' or (sys_platform == 'linux' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')", # torchcodec does not exist in those systems. If not provided, transformer will use torchvision instead by default.
   "torchvision",
   "torchao==0.9.0",
@@ -133,11 +134,12 @@ gpu = [
   "transformers==4.57.1",
   "uvicorn",
   "uvloop",
-  "xgrammar==0.1.27",
-  "grpcio==1.75.1", # keep it align with compile_proto.py
-  "grpcio-tools==1.75.1", # keep it align with compile_proto.py
-  "grpcio-reflection==1.75.1", # required by srt/entrypoints/grpc_server.py
-  "grpcio-health-checking==1.75.1", # required for Kubernetes gRPC health probes
+#  "xgrammar==0.1.27", -> irrelevant and causing dep issues
+# the following depend on protobuf<7.0.0 and >=6.31.1
+#  "grpcio==1.75.1", # keep it align with compile_proto.py
+#  "grpcio-tools==1.75.1", # keep it align with compile_proto.py
+#  "grpcio-reflection==1.75.1", # required by srt/entrypoints/grpc_server.py
+#  "grpcio-health-checking==1.75.1", # required for Kubernetes gRPC health probes
 ]
 
 checkpoint-engine = ["checkpoint-engine==0.1.2"]
