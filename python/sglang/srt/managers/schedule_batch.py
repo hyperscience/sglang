@@ -1853,6 +1853,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             encoder_out_cache_loc=self.encoder_out_cache_loc,
             lora_ids=[req.lora_id for req in self.reqs],
             sampling_info=self.sampling_info,
+            req_rids=[req.rid for req in self.reqs],
+            output_attention_weights=[req.output_attention_weights for req in self.reqs],
             input_embeds=self.input_embeds,
             token_type_ids=self.token_type_ids,
             spec_algorithm=self.spec_algorithm,
@@ -1961,6 +1963,9 @@ class ModelWorkerBatch:
 
     # Sampling info
     sampling_info: SamplingBatchInfo
+
+    req_rids: list[str]  # identifier of each request, used to record query buffer
+    output_attention_weights: list[bool]  # whether to output attention weights for each request
 
     # The original sequence lengths, Qwen-1M related
     orig_seq_lens: Optional[torch.Tensor] = None

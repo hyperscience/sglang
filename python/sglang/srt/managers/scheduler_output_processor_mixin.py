@@ -10,8 +10,8 @@ from sglang.srt.environ import envs
 from sglang.srt.hs.attention_heatmap import (
     GB,
     aggregate_attentions,
-    compute_attn_weights,
-    get_query_buffer_gb,
+    compute_attn_weights_for_request,
+    get_req_query_buffer_gb,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import (
@@ -27,7 +27,7 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.model_executor.model_runner import (
-    clean_global_output_token_query,
+    drop_req_in_output_token_query_buffer,
     get_global_output_token_query_buffer,
 )
 from sglang.srt.tracing.trace import trace_slice, trace_slice_batch, trace_slice_end
@@ -353,14 +353,20 @@ class SchedulerOutputProcessorMixin:
                     mem_before = torch.cuda.memory_allocated() / GB
 
                     query_buffer = get_global_output_token_query_buffer()
-                    # indices of prompt tokens in the kv cache
-                    prompt_token_indices = self.req_to_token_pool.req_to_token[
+                    req_query_buffer = query_buffer.pop(req.rid)
+                    # with overlap scheduling, it's possible that one extra forward pass is executed after the request is finished
+                    assert len(req_query_buffer) == len(req.output_ids) or len(req_query_buffer) == len(req.output_ids) + 1
+                    req_query_buffer = req_query_buffer[: len(req.output_ids)]
+
+                    # indices of request prompt tokens in the KV cache
+                    req_prompt_token_indices = self.req_to_token_pool.req_to_token[
                         req.req_pool_idx, : len(req.origin_input_ids)
                     ].tolist()
-                    layers_attn_weights = compute_attn_weights(
+
+                    layers_attn_weights = compute_attn_weights_for_request(
                         key_cache_buffer=self.token_to_kv_pool_allocator._kvcache.k_buffer,
-                        query_buffer=query_buffer,
-                        prompt_token_indices=prompt_token_indices,
+                        req_query_buffer=req_query_buffer,
+                        req_prompt_token_indices=req_prompt_token_indices,
                         page_size=self.page_size,
                         chunked_attention_compute_size=req.chunked_attention_compute_size,
                     )
@@ -374,17 +380,17 @@ class SchedulerOutputProcessorMixin:
                     peak_increase = peak_mem - mem_before
 
                     f = (
-                        f"Compute attention weights, "
-                        f"#input-token: {len(prompt_token_indices)}, "
-                        f"#output-token: {len(query_buffer)}, "
+                        f"Compute attention weights for one request, "
+                        f"#input-token: {len(req_prompt_token_indices)}, "
+                        f"#output-token: {len(req.output_ids)}, "
                         f"chunk-size: {req.chunked_attention_compute_size}, "
-                        f"query-buffer: {get_query_buffer_gb(query_buffer):.3f} GB, "
+                        f"query-buffer: {get_req_query_buffer_gb(req_query_buffer):.3f} GB, "
                         f"VRAM-peak-increase: {peak_increase:.3f} GB, "
                         f"time: {time.perf_counter() - start_time:.3f} s, "
                     )
                     logger.info(f)
 
-                clean_global_output_token_query()
+                drop_req_in_output_token_query_buffer(req.rid)
 
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
                     # Asynchronously offload KV cache; release_kv_cache will be called after Device->Host transfer completes

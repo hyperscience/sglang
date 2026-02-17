@@ -6,65 +6,65 @@ import torch
 GB = 1024**3
 
 
-def get_query_buffer_gb(
-    query_buffer: list[
+def get_req_query_buffer_gb(
+    req_query_buffer: list[
         list[torch.Tensor]
-    ],  # [num_output_tokens, num_layers, 1, (num_q_heads * head_dim)]
+    ],  # [num_output_tokens, num_layers, (num_q_heads * head_dim)]
 ) -> float:
-    if not query_buffer:
+    if not req_query_buffer:
         return 0.0
 
-    # query_buffer[token_idx][layer_idx] is a torch.Tensor
+    # req_query_buffer[token_idx][layer_idx] is a torch.Tensor
     # We count elements in one token's worth of layers
     total_elements = 0
-    for layer_tensor in query_buffer[0]:
+    for layer_tensor in req_query_buffer[0]:
         total_elements += layer_tensor.numel()
 
     # Multiply by number of output tokens
-    total_elements *= len(query_buffer)
+    total_elements *= len(req_query_buffer)
 
     # Get bytes per element (e.g., 2 for float16)
-    bytes_per_element = query_buffer[0][0].element_size()
+    bytes_per_element = req_query_buffer[0][0].element_size()
 
     # Convert to Gigabytes (1024^3)
     return (total_elements * bytes_per_element) / GB
 
 
-def compute_attn_weights(
+def compute_attn_weights_for_request(
     key_cache_buffer: list[
         torch.Tensor
-    ],  # [num_layers, context_len, num_k_heads, head_dim]
-    query_buffer: list[
+    ],  # [num_layers, KV cache size, num_k_heads, head_dim]
+    req_query_buffer: list[
         list[torch.Tensor]
-    ],  # [num_output_tokens, num_layers, 1, (num_q_heads * head_dim)]
-    prompt_token_indices: list[int],
+    ],  # [num_output_tokens, num_layers, (num_q_heads * head_dim)]
+    req_prompt_token_indices: list[int],  # indices of prompt tokens in the KV cache
     page_size: int,
     chunked_attention_compute_size: Optional[int],
 ) -> list[list[torch.Tensor]]:
     assert page_size == 1, "Implemented only for page_size == 1"
-    assert len(key_cache_buffer) == len(query_buffer[0]), (
+    assert len(key_cache_buffer) == len(req_query_buffer[0]), (
         "Expecting same number of layers."
     )
 
     num_layers = len(key_cache_buffer)
-    num_output_tokens = len(query_buffer)
-    num_prompt_tokens = len(prompt_token_indices)
+    num_output_tokens = len(req_query_buffer)
+    num_prompt_tokens = len(req_prompt_token_indices)
 
     layers_attn_weights_per_token: list[list[torch.Tensor]] | None = None
 
     for layer_id in range(num_layers):
         # Prepare Keys [num_prompt_tokens, num_k_heads, head_dim]
-        keys_base = key_cache_buffer[layer_id][prompt_token_indices, :, :]
+        keys_base = key_cache_buffer[layer_id][req_prompt_token_indices, :, :]
         num_k_heads, head_dim = keys_base.shape[-2:]
 
         # Reconstruct Queries [num_output_tokens, num_q_heads, head_dim]
-        query_last_dimension = query_buffer[0][layer_id].shape[-1]
+        query_last_dimension = req_query_buffer[0][layer_id].shape[-1]
         num_q_heads = query_last_dimension // head_dim
 
         all_querys = torch.concat(
             [
                 query[layer_id].reshape(1, num_q_heads, head_dim)
-                for query in query_buffer
+                for query in req_query_buffer
             ],
             axis=0,
         )
@@ -127,7 +127,7 @@ def aggregate_attentions(attentions: list[torch.Tensor]) -> np.ndarray:
         attention_device = layer_attention.device
         layer_attention_head_avg = torch.concat(
             (
-                # The attention to the first token is called null attetion
+                # The attention to the first prompt token is called null attention
                 # (https://aclanthology.org/W19-4808.pdf)
                 # Usually it is very large compared to other attention values
                 # Replacing it with 0 instead
