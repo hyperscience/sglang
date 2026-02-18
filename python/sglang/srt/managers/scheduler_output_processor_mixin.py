@@ -8,10 +8,11 @@ import torch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.hs.attention_heatmap import (
-    GB,
+    GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER,
+    MB,
     aggregate_attentions,
     compute_attn_weights_for_request,
-    get_req_query_buffer_gb,
+    get_req_query_buffer_mb,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import (
@@ -26,10 +27,6 @@ from sglang.srt.managers.schedule_batch import (
     ScheduleBatch,
 )
 from sglang.srt.mem_cache.common import release_kv_cache
-from sglang.srt.model_executor.model_runner import (
-    drop_req_in_output_token_query_buffer,
-    get_global_output_token_query_buffer,
-)
 from sglang.srt.tracing.trace import trace_slice, trace_slice_batch, trace_slice_end
 
 if TYPE_CHECKING:
@@ -350,15 +347,16 @@ class SchedulerOutputProcessorMixin:
 
                     # Track GPU memory before computation
                     torch.cuda.reset_peak_memory_stats()
-                    mem_before = torch.cuda.memory_allocated() / GB
+                    alloc_before = torch.cuda.memory_allocated() / MB
+                    reserved_before = torch.cuda.memory_reserved() / MB
 
-                    query_buffer = get_global_output_token_query_buffer()
-                    req_query_buffer = query_buffer.pop(req.rid)
-                    # with overlap scheduling, it's possible that one extra forward pass is executed after the request is finished
+                    req_query_buffer = GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.pop(req.rid).queries
+                    # With overlap scheduling, it's possible that one extra forward pass is executed after the request is finished
                     assert len(req_query_buffer) == len(req.output_ids) or len(req_query_buffer) == len(req.output_ids) + 1
                     req_query_buffer = req_query_buffer[: len(req.output_ids)]
+                    query_buffer_mb = get_req_query_buffer_mb(req_query_buffer)
 
-                    # indices of request prompt tokens in the KV cache
+                    # Indices of request prompt tokens in the KV cache
                     req_prompt_token_indices = self.req_to_token_pool.req_to_token[
                         req.req_pool_idx, : len(req.origin_input_ids)
                     ].tolist()
@@ -376,21 +374,32 @@ class SchedulerOutputProcessorMixin:
                     req.hidden_states = flattened_attention_all_tokens
 
                     # Track peak GPU memory usage
-                    peak_mem = torch.cuda.max_memory_allocated() / GB
-                    peak_increase = peak_mem - mem_before
+                    peak_alloc = torch.cuda.max_memory_allocated() / MB
+                    peak_reserved = torch.cuda.max_memory_reserved() / MB
+                    peak_alloc_increase = max(0.0, peak_alloc - alloc_before)
+                    peak_reserved_increase = max(0.0, peak_reserved - reserved_before)
 
                     f = (
-                        f"Compute attention weights for one request, "
+                        f"Compute attention weights, "
                         f"#input-token: {len(req_prompt_token_indices)}, "
                         f"#output-token: {len(req.output_ids)}, "
                         f"chunk-size: {req.chunked_attention_compute_size}, "
-                        f"query-buffer: {get_req_query_buffer_gb(req_query_buffer):.3f} GB, "
-                        f"VRAM-peak-increase: {peak_increase:.3f} GB, "
+                        f"query-buffer: {int(query_buffer_mb)} MB, "
+                        f"VRAM-alloc-peak-increase: {int(peak_alloc_increase)} MB, "
+                        f"VRAM-reserved-peak-increase: {int(peak_reserved_increase)} MB, "
                         f"time: {time.perf_counter() - start_time:.3f} s, "
                     )
                     logger.info(f)
 
-                drop_req_in_output_token_query_buffer(req.rid)
+                    # Explicitly release temporary references after finishing computation.
+                    del req_query_buffer
+                    del req_prompt_token_indices
+                    del layers_attn_weights
+                    del flattened_attention_all_tokens
+
+                if req.rid in GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER:
+                    del GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req.rid]
+
 
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
                     # Asynchronously offload KV cache; release_kv_cache will be called after Device->Host transfer completes

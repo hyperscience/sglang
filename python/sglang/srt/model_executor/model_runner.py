@@ -74,6 +74,7 @@ from sglang.srt.eplb.expert_location import (
     set_global_expert_location_metadata,
 )
 from sglang.srt.eplb.expert_location_updater import ExpertLocationUpdater
+from sglang.srt.hs.attention_heatmap import fill_output_token_query_buffer_for_batch
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.attention.attention_registry import (
     ATTENTION_BACKENDS,
@@ -111,7 +112,7 @@ from sglang.srt.mem_cache.memory_pool import (
 )
 from sglang.srt.model_executor.cpu_graph_runner import CPUGraphRunner
 from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode, PPProxyTensors
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_executor.npu_graph_runner import NPUGraphRunner
 from sglang.srt.model_executor.piecewise_cuda_graph_runner import (
     PiecewiseCudaGraphRunner,
@@ -215,58 +216,6 @@ UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
 MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO = 3
 
 logger = logging.getLogger(__name__)
-
-# Stores the query used to decode each output token, for each running request.
-# dict[req_rid: str, output_token_query_buffer: list[torch.Tensor((num_hidden_layers, hidden_size))]]
-GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER: dict[str, list[torch.Tensor]] = defaultdict(list)
-
-
-def get_global_output_token_query_buffer():
-    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-    return GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-
-def drop_req_in_output_token_query_buffer(req_rid: str):
-    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-    if req_rid in GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER:
-        del GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
-
-def fill_output_token_query_buffer_for_batch(
-    query_buffer: torch.Tensor, # (num_layers, max_num_requests, hidden_size)
-    forward_batch: ForwardBatch
-) -> None:
-    mode = forward_batch.forward_mode
-    assert mode in (ForwardMode.EXTEND, ForwardMode.DECODE), (
-        f"{forward_batch.forward_mode=} is not supported."
-    )
-    assert query_buffer.ndim == 3
-
-    batch_size = forward_batch.batch_size
-    req_rids = forward_batch.req_rids
-    output_attention_weights = forward_batch.output_attention_weights
-    assert req_rids is not None and output_attention_weights is not None
-    assert batch_size == len(req_rids) == len(output_attention_weights)
-    assert batch_size <= query_buffer.shape[1]
-
-    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-    if mode == ForwardMode.DECODE:
-        # We just append the query for the next decoded token.
-        for req_idx, req_rid in enumerate(req_rids):
-            if not output_attention_weights[req_idx]:
-                continue
-            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid].append(
-                query_buffer[:, req_idx, :].clone()
-            )
-    else:
-        # We overwrite the buffer with the last token query, as we only care about the query for the last token in the prefill phase,
-        # which is used to generate the first output token.
-        # Note the prefill phase for one request might span multiple forward passes.
-        for req_idx, req_rid in enumerate(req_rids):
-            if not output_attention_weights[req_idx]:
-                continue
-            assert len(GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid]) <= 1
-            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid] = [
-                query_buffer[:, req_idx, :].clone()
-            ]
 
 if _is_npu:
     import torch_npu
@@ -2258,8 +2207,6 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
-        global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-        
         mode_check = (
             forward_batch.forward_mode.is_cpu_graph
             if self.device == "cpu"

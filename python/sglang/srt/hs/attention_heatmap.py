@@ -1,12 +1,79 @@
 from typing import Optional
 
+from dataclasses import dataclass, field
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from collections import defaultdict
+
+
 import numpy as np
 import torch
 
-GB = 1024**3
+MB = 1024**2
 
 
-def get_req_query_buffer_gb(
+@dataclass
+class RequestQueryBuffer:
+    # the mode for the last forward pass involving this request: either EXTEND or DECODE.
+    last_forward_pass_mode: Optional[ForwardMode] = None
+    # Stores the query used to generate each output token, for each running request.
+    # A new token is generated for the last prefill and each decode forward pass.
+    queries: list[torch.Tensor] = field(
+        default_factory=list
+    )  # list[torch.Tensor((num_hidden_layers, hidden_size))]]
+
+
+GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER: dict[str, RequestQueryBuffer] = defaultdict(
+    RequestQueryBuffer
+)
+
+
+def fill_output_token_query_buffer_for_batch(
+    query_buffer: torch.Tensor,  # (num_layers, max_num_requests, hidden_size)
+    forward_batch: ForwardBatch,
+) -> None:
+    mode = forward_batch.forward_mode
+    assert mode in (ForwardMode.EXTEND, ForwardMode.DECODE), (
+        f"{forward_batch.forward_mode=} is not supported."
+    )
+    assert query_buffer.ndim == 3
+
+    batch_size = forward_batch.batch_size
+    req_rids = forward_batch.req_rids
+    output_attention_weights = forward_batch.output_attention_weights
+    assert req_rids is not None and output_attention_weights is not None
+    assert batch_size == len(req_rids) == len(output_attention_weights)
+    assert batch_size <= query_buffer.shape[1]
+
+    if mode == ForwardMode.DECODE:
+        for req_idx, req_rid in enumerate(req_rids):
+            if not output_attention_weights[req_idx]:
+                continue
+            request_query_buffer = GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
+            # As we are generating one new token in this forward pass, we append the query.
+            request_query_buffer.queries.append(query_buffer[:, req_idx, :].clone())
+            request_query_buffer.last_forward_pass_mode = ForwardMode.DECODE
+    else:
+        for req_idx, req_rid in enumerate(req_rids):
+            if not output_attention_weights[req_idx]:
+                continue
+            request_query_buffer = GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
+            if request_query_buffer.last_forward_pass_mode == ForwardMode.EXTEND:
+                # Replace the query for the last forward pass, as the pass did not generate any new token.
+                request_query_buffer.queries[-1] = query_buffer[:, req_idx, :].clone()
+            elif request_query_buffer.last_forward_pass_mode == ForwardMode.DECODE:
+                # This means the request was retracted during decoding due to lack of KV cache capacity.
+                # Now, we are doing the first prefill forward pass, which may contain both prompt and already decoded tokens.
+                # We keep the existing queries corresponding to the already decoded tokens and append the query
+                # for the current forward pass, which may be generating a new token if there are no more remaining tokens to prefill.
+                request_query_buffer.queries.append(query_buffer[:, req_idx, :].clone())
+            else:
+                # First prefill forward pass for this request.
+                assert request_query_buffer.last_forward_pass_mode is None
+                request_query_buffer.queries.append(query_buffer[:, req_idx, :].clone())
+            request_query_buffer.last_forward_pass_mode = ForwardMode.EXTEND
+
+
+def get_req_query_buffer_mb(
     req_query_buffer: list[
         list[torch.Tensor]
     ],  # [num_output_tokens, num_layers, (num_q_heads * head_dim)]
@@ -26,8 +93,8 @@ def get_req_query_buffer_gb(
     # Get bytes per element (e.g., 2 for float16)
     bytes_per_element = req_query_buffer[0][0].element_size()
 
-    # Convert to Gigabytes (1024^3)
-    return (total_elements * bytes_per_element) / GB
+    # Convert to Megabytes (1024^2)
+    return (total_elements * bytes_per_element) / MB
 
 
 def compute_attn_weights_for_request(
