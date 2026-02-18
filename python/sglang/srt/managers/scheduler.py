@@ -62,6 +62,7 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+from sglang.srt.hs.attention_heatmap import maybe_drop_extra_query_due_to_overlap_scheduling
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.managers.io_struct import (
@@ -1964,6 +1965,11 @@ class Scheduler(
             )
 
             for req in retracted_reqs:
+                if req.output_attention_weights:
+                    maybe_drop_extra_query_due_to_overlap_scheduling(
+                        req_rid=req.rid, 
+                        req_num_output_tokens=len(req.output_ids)
+                    )
                 self._add_request_to_queue(req, is_retracted=True)
         else:
             self.new_token_ratio = max(

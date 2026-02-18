@@ -12,7 +12,7 @@ MB = 1024**2
 
 
 @dataclass
-class RequestQueryBuffer:
+class RequestOutputTokenQueryBuffer:
     # the mode for the last forward pass involving this request: either EXTEND or DECODE.
     last_forward_pass_mode: Optional[ForwardMode] = None
     # Stores the query used to generate each output token, for each running request.
@@ -22,15 +22,27 @@ class RequestQueryBuffer:
     )  # list[torch.Tensor((num_hidden_layers, hidden_size))]]
 
 
-GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER: dict[str, RequestQueryBuffer] = defaultdict(
-    RequestQueryBuffer
+
+OUTPUT_TOKEN_QUERY_BUFFER: dict[str, RequestOutputTokenQueryBuffer] = defaultdict(
+    RequestOutputTokenQueryBuffer  # key is Req.rid
 )
 
+def maybe_drop_extra_query_due_to_overlap_scheduling(
+    req_rid: str,
+    req_num_output_tokens: int,
+) -> None:
+    """With Overlap Scheduling, we may have an extra query in the buffer due to a forward pass
+    that hasn't been post-processed: request was already finished or retracted."""
+    req_buffer = OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
+    assert len(req_buffer.queries) == req_num_output_tokens or len(req_buffer.queries) == req_num_output_tokens + 1
+    if len(req_buffer.queries) == req_num_output_tokens + 1:
+        req_buffer.queries.pop()
 
 def fill_output_token_query_buffer_for_batch(
     query_buffer: torch.Tensor,  # (num_layers, max_num_requests, hidden_size)
     forward_batch: ForwardBatch,
 ) -> None:
+    """Populates the buffer with the queries of the current forward batch."""
     mode = forward_batch.forward_mode
     assert mode in (ForwardMode.EXTEND, ForwardMode.DECODE), (
         f"{forward_batch.forward_mode=} is not supported."
@@ -48,7 +60,7 @@ def fill_output_token_query_buffer_for_batch(
         for req_idx, req_rid in enumerate(req_rids):
             if not output_attention_weights[req_idx]:
                 continue
-            request_query_buffer = GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
+            request_query_buffer = OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
             # As we are generating one new token in this forward pass, we append the query.
             request_query_buffer.queries.append(query_buffer[:, req_idx, :].clone())
             request_query_buffer.last_forward_pass_mode = ForwardMode.DECODE
@@ -56,7 +68,7 @@ def fill_output_token_query_buffer_for_batch(
         for req_idx, req_rid in enumerate(req_rids):
             if not output_attention_weights[req_idx]:
                 continue
-            request_query_buffer = GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
+            request_query_buffer = OUTPUT_TOKEN_QUERY_BUFFER[req_rid]
             if request_query_buffer.last_forward_pass_mode == ForwardMode.EXTEND:
                 # Replace the query for the last forward pass, as the pass did not generate any new token.
                 request_query_buffer.queries[-1] = query_buffer[:, req_idx, :].clone()

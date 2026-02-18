@@ -8,11 +8,12 @@ import torch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.hs.attention_heatmap import (
-    GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER,
     MB,
+    OUTPUT_TOKEN_QUERY_BUFFER,
     aggregate_attentions,
     compute_attn_weights_for_request,
     get_req_query_buffer_mb,
+    maybe_drop_extra_query_due_to_overlap_scheduling,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import (
@@ -345,15 +346,19 @@ class SchedulerOutputProcessorMixin:
                         "Cannot return both hidden states and attention heatmap."
                     )
 
+                    maybe_drop_extra_query_due_to_overlap_scheduling(
+                        req_rid=req.rid, 
+                        req_num_output_tokens=len(req.output_ids)
+                    )
+
+
                     # Track GPU memory before computation
                     torch.cuda.reset_peak_memory_stats()
                     alloc_before = torch.cuda.memory_allocated() / MB
                     reserved_before = torch.cuda.memory_reserved() / MB
 
-                    req_query_buffer = GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.pop(req.rid).queries
-                    # With overlap scheduling, it's possible that one extra forward pass is executed after the request is finished
-                    assert len(req_query_buffer) == len(req.output_ids) or len(req_query_buffer) == len(req.output_ids) + 1
-                    req_query_buffer = req_query_buffer[: len(req.output_ids)]
+                    req_query_buffer = OUTPUT_TOKEN_QUERY_BUFFER.pop(req.rid).queries
+                    assert len(req_query_buffer) == len(req.output_ids)
                     query_buffer_mb = get_req_query_buffer_mb(req_query_buffer)
 
                     # Indices of request prompt tokens in the KV cache
@@ -397,8 +402,8 @@ class SchedulerOutputProcessorMixin:
                     del layers_attn_weights
                     del flattened_attention_all_tokens
 
-                if req.rid in GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER:
-                    del GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER[req.rid]
+                if req.rid in OUTPUT_TOKEN_QUERY_BUFFER:
+                    del OUTPUT_TOKEN_QUERY_BUFFER[req.rid]
 
 
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
