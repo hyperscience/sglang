@@ -8,7 +8,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-MB = 1024**2
+MiB = 1024**2
 
 
 @dataclass
@@ -106,7 +106,7 @@ def get_req_query_buffer_mb(
     bytes_per_element = req_query_buffer[0][0].element_size()
 
     # Convert to Megabytes (1024^2)
-    return (total_elements * bytes_per_element) / MB
+    return (total_elements * bytes_per_element) / MiB
 
 
 def compute_attn_weights_for_request(

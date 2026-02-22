@@ -8,7 +8,7 @@ import torch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.hs.attention_heatmap import (
-    MB,
+    MiB,
     OUTPUT_TOKEN_QUERY_BUFFER,
     aggregate_attentions,
     compute_attn_weights_for_request,
@@ -354,8 +354,8 @@ class SchedulerOutputProcessorMixin:
 
                     # Track GPU memory before computation
                     torch.cuda.reset_peak_memory_stats()
-                    alloc_before = torch.cuda.memory_allocated() / MB
-                    reserved_before = torch.cuda.memory_reserved() / MB
+                    alloc_before = torch.cuda.memory_allocated() / MiB
+                    reserved_before = torch.cuda.memory_reserved() / MiB
 
                     req_query_buffer = OUTPUT_TOKEN_QUERY_BUFFER.pop(req.rid).queries
                     assert len(req_query_buffer) == len(req.output_ids)
@@ -379,8 +379,8 @@ class SchedulerOutputProcessorMixin:
                     req.hidden_states = flattened_attention_all_tokens
 
                     # Track peak GPU memory usage
-                    peak_alloc = torch.cuda.max_memory_allocated() / MB
-                    peak_reserved = torch.cuda.max_memory_reserved() / MB
+                    peak_alloc = torch.cuda.max_memory_allocated() / MiB
+                    peak_reserved = torch.cuda.max_memory_reserved() / MiB
                     peak_alloc_increase = max(0.0, peak_alloc - alloc_before)
                     peak_reserved_increase = max(0.0, peak_reserved - reserved_before)
 
@@ -389,9 +389,9 @@ class SchedulerOutputProcessorMixin:
                         f"#input-token: {len(req_prompt_token_indices)}, "
                         f"#output-token: {len(req.output_ids)}, "
                         f"chunk-size: {req.chunked_attention_compute_size}, "
-                        f"query-buffer: {int(query_buffer_mb)} MB, "
-                        f"VRAM-alloc-peak-increase: {int(peak_alloc_increase)} MB, "
-                        f"VRAM-reserved-peak-increase: {int(peak_reserved_increase)} MB, "
+                        f"query-buffer: {int(query_buffer_mb)} MiB, "
+                        f"VRAM-alloc-peak-increase: {int(peak_alloc_increase)} MiB, "
+                        f"VRAM-reserved-peak-increase: {int(peak_reserved_increase)} MiB, "
                         f"time: {time.perf_counter() - start_time:.3f} s, "
                     )
                     logger.info(f)
