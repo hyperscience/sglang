@@ -201,6 +201,9 @@ class ForwardBatch:
     # The sum of all sequence lengths
     seq_lens_sum: int
 
+    req_rids: Optional[list[str]] = None  # identifier of each request, used to record query buffer
+    output_attention_weights: Optional[list[bool]] = None  # whether to output attention weights for each request
+
     # The original sequence length without being chunked. Qwen-1M related.
     orig_seq_lens: Optional[torch.Tensor] = None
 
@@ -360,6 +363,8 @@ class ForwardBatch:
             encoder_lens_cpu=batch.encoder_lens_cpu,
             encoder_out_cache_loc=batch.encoder_out_cache_loc,
             seq_lens_sum=batch.seq_lens_sum,
+            req_rids=batch.req_rids,
+            output_attention_weights=batch.output_attention_weights,
             seq_lens_cpu=batch.seq_lens_cpu,
             orig_seq_lens=batch.orig_seq_lens,
             return_logprob=batch.return_logprob,

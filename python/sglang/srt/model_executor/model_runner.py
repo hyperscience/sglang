@@ -74,6 +74,7 @@ from sglang.srt.eplb.expert_location import (
     set_global_expert_location_metadata,
 )
 from sglang.srt.eplb.expert_location_updater import ExpertLocationUpdater
+from sglang.srt.hs.attention_heatmap import fill_output_token_query_buffer_for_batch
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.attention.attention_registry import (
     ATTENTION_BACKENDS,
@@ -215,18 +216,6 @@ UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
 MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO = 3
 
 logger = logging.getLogger(__name__)
-
-# store the query for each decoded token
-GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER = []
-
-
-def get_global_output_token_query_buffer():
-    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-    return GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-
-def clean_global_output_token_query():
-    global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-    GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER = []
 
 if _is_npu:
     import torch_npu
@@ -2218,8 +2207,6 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
-        global GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER
-        
         mode_check = (
             forward_batch.forward_mode.is_cpu_graph
             if self.device == "cpu"
@@ -2237,11 +2224,9 @@ class ModelRunner:
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
-            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.append(
-                [
-                    layer_query_buffer.clone()
-                    for layer_query_buffer in self.model.model.query_buffer
-                ]
+            fill_output_token_query_buffer_for_batch(
+                query_buffer=self.model.model.query_buffer,
+                forward_batch=forward_batch,
             )
             return ret, can_run_graph
 
@@ -2257,11 +2242,9 @@ class ModelRunner:
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
-            GLOBAL_OUTPUT_TOKEN_QUERY_BUFFER.append(
-                [
-                    layer_query_buffer.clone()
-                    for layer_query_buffer in self.model.model.query_buffer
-                ]
+            fill_output_token_query_buffer_for_batch(
+                query_buffer=self.model.model.query_buffer,
+                forward_batch=forward_batch,
             )
         elif forward_batch.forward_mode.is_split_prefill():
             ret = self.forward_split_prefill(
@@ -2274,6 +2257,10 @@ class ModelRunner:
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
+            )
+            fill_output_token_query_buffer_for_batch(
+                query_buffer=self.model.model.query_buffer,
+                forward_batch=forward_batch,
             )
         elif forward_batch.forward_mode.is_idle():
             ret = self.forward_idle(forward_batch, pp_proxy_tensors=pp_proxy_tensors)

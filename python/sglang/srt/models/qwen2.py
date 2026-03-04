@@ -186,7 +186,7 @@ class Qwen2Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
-        return output, q[-1:, ...]
+        return output, q
 
 
 class Qwen2DecoderLayer(nn.Module):
@@ -323,12 +323,18 @@ class Qwen2Model(nn.Module):
         # For EAGLE3 support
         self.layers_to_capture = []
 
+        max_batch_size = get_global_server_args().max_running_requests
+        assert max_batch_size is not None, 'Expecting max_running_requests to be set for query buffer initialization.'
+
         # this will store the queries for the current token
         self.register_buffer(
             'query_buffer',
             torch.zeros(
-                # 3584 hidden_size = 28 heads * 128 head dim
-                (config.num_hidden_layers, 1, config.hidden_size),
+                (
+                    config.num_hidden_layers,
+                    max_batch_size,  # we allocate capacity such that we can always record queries for all requests in the batch
+                    config.hidden_size,  # num_q_heads * head_dim
+                ),
                 dtype=config.torch_dtype,
                 device=torch.cuda.current_device(),
             ),
@@ -377,9 +383,36 @@ class Qwen2Model(nn.Module):
                 forward_batch,
                 residual,
             )
-            # we will store the current token queries during decoding
+
+            assert not forward_batch.forward_mode.is_mixed(), (
+                "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
+            )
+
+            batch_size = forward_batch.batch_size
+            assert batch_size <= self.query_buffer.shape[1], 'Batch size exceeds query buffer capacity.'
+
             if forward_batch.forward_mode.is_decode():
-                self.query_buffer[i] = q
+                """Decode mode: generating a single token for each request in the batch.
+                We record the query used to generate the token for each request in the batch.
+                q: torch.Tensor of shape [batch_size, hidden_size]"""
+                assert q.ndim == 2 and q.shape == (batch_size, self.config.hidden_size)
+                self.query_buffer[i][:batch_size] = q
+
+            elif forward_batch.forward_mode.is_extend():
+                """Extend mode: prefilling multiple requests together.
+                q: torch.Tensor of shape [total_extend_tokens, hidden_size]
+                We record the query for the last token of each request in the batch, 
+                as the query for the last token of the prompt will be used to generate the first output token."""
+                extend_seq_lens = forward_batch.extend_seq_lens_cpu
+                assert extend_seq_lens is not None
+                assert len(extend_seq_lens) == batch_size
+                assert q.ndim == 2 and q.shape == (sum(extend_seq_lens), self.config.hidden_size)
+
+                req_last_token_idx = -1
+                for req_idx, extend_len in enumerate(extend_seq_lens):
+                    req_last_token_idx += extend_len
+                    self.query_buffer[i, req_idx] = q[req_last_token_idx]
+
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
                 {
