@@ -293,6 +293,92 @@ def init_mm_embedding_cache(max_size: int = 0):
     embedding_cache = MultiModalStaticCache(max_size)
 
 
+def _log_embed_mm_memory_usage(
+    phase: str,
+    num_mm_items: int,
+    num_mm_requests: int,
+    num_image_instances: int,
+):
+    if not torch.cuda.is_available():
+        return
+
+    try:
+        device_idx = torch.cuda.current_device()
+    except Exception:
+        logger.debug("Failed to get current CUDA device.", exc_info=True)
+        return
+
+    if phase == "before":
+        try:
+            torch.cuda.reset_peak_memory_stats(device_idx)
+        except Exception:
+            logger.debug(
+                "Failed to reset CUDA peak memory stats for embed_mm_inputs.",
+                exc_info=True,
+            )
+
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device_idx)
+        allocated_bytes = torch.cuda.memory_allocated(device_idx)
+        reserved_bytes = torch.cuda.memory_reserved(device_idx)
+        peak_allocated_bytes = None
+        peak_reserved_bytes = None
+        if phase == "after":
+            peak_allocated_bytes = torch.cuda.max_memory_allocated(device_idx)
+            peak_reserved_bytes = torch.cuda.max_memory_reserved(device_idx)
+    except Exception:
+        logger.debug("Failed to query CUDA memory for embed_mm_inputs.", exc_info=True)
+        return
+
+    gib = float(1 << 30)
+    if phase == "after":
+        logger.info(
+            "embed_mm_inputs %s num_mm_requests=%d num_mm_items=%d num_image_instances=%d GPU memory: free=%.2f GiB allocated=%.2f GiB reserved=%.2f GiB peak_allocated=%.2f GiB peak_reserved=%.2f GiB total=%.2f GiB",
+            phase,
+            num_mm_requests,
+            num_mm_items,
+            num_image_instances,
+            free_bytes / gib,
+            allocated_bytes / gib,
+            reserved_bytes / gib,
+            peak_allocated_bytes / gib,
+            peak_reserved_bytes / gib,
+            total_bytes / gib,
+        )
+    else:
+        logger.info(
+            "embed_mm_inputs %s num_mm_requests=%d num_mm_items=%d num_image_instances=%d GPU memory: free=%.2f GiB allocated=%.2f GiB reserved=%.2f GiB total=%.2f GiB",
+            phase,
+            num_mm_requests,
+            num_mm_items,
+            num_image_instances,
+            free_bytes / gib,
+            allocated_bytes / gib,
+            reserved_bytes / gib,
+            total_bytes / gib,
+        )
+
+
+def _count_image_instances(item_flatten_list: List[MultimodalDataItem]) -> int:
+    image_instances = 0
+    for item in item_flatten_list:
+        if not item.is_image():
+            continue
+        offsets = item.offsets
+        if offsets is None:
+            image_instances += 1
+            continue
+
+        flattened_offsets = flatten_nested_list(offsets)
+        tuple_offsets = [
+            off
+            for off in flattened_offsets
+            if isinstance(off, tuple) and len(off) == 2
+        ]
+        image_instances += len(tuple_offsets) if tuple_offsets else 1
+    return image_instances
+
+
 def get_embedding_chunk(
     embedding: torch.Tensor,
     extend_prefix_len: int,
@@ -529,6 +615,14 @@ def embed_mm_inputs(
     item_flatten_list = []
     for mm_inputs in mm_inputs_list:
         item_flatten_list += [item for item in mm_inputs.mm_items if item is not None]
+    num_image_instances = _count_image_instances(item_flatten_list)
+
+    _log_embed_mm_memory_usage(
+        phase="before",
+        num_mm_items=len(item_flatten_list),
+        num_mm_requests=len(mm_inputs_list),
+        num_image_instances=num_image_instances,
+    )
 
     # deepstack_embeddings: per-modality
     modalities, embeddings, masks, deepstack_embeddings = [], [], [], []
@@ -627,6 +721,13 @@ def embed_mm_inputs(
             input_deepstack_embeds[indices] = deepstack_embeddings[i].to(
                 inputs_embeds.device, inputs_embeds.dtype
             )
+
+    _log_embed_mm_memory_usage(
+        phase="after",
+        num_mm_items=len(item_flatten_list),
+        num_mm_requests=len(mm_inputs_list),
+        num_image_instances=num_image_instances,
+    )
 
     return inputs_embeds, other_info
 

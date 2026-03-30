@@ -1995,6 +1995,7 @@ class Scheduler(
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
         self.forward_ct += 1
+        self._log_gpu_memory_usage(batch, phase="before")
 
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
@@ -2117,7 +2118,67 @@ class Scheduler(
             for req in batch.reqs:
                 req.time_stats.prefill_end_time_host = current_time
 
+        self._log_gpu_memory_usage(batch, phase="after")
+
         return ret
+
+    def _log_gpu_memory_usage(self, batch: ScheduleBatch, phase: str):
+        if not self.device.startswith("cuda") or not hasattr(torch, "cuda"):
+            return
+
+        if batch.forward_mode.is_decode() and not (
+            self.current_scheduler_metrics_enabled()
+            and (self.forward_ct_decode + 1) % self.server_args.decode_log_interval == 0
+        ):
+            return
+
+        if phase == "before":
+            try:
+                torch.cuda.reset_peak_memory_stats(self.gpu_id)
+            except Exception:
+                logger.debug("Failed to reset CUDA peak memory stats.", exc_info=True)
+
+        free_bytes = total_bytes = allocated_bytes = reserved_bytes = None
+        peak_allocated_bytes = peak_reserved_bytes = None
+
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(self.gpu_id)
+            allocated_bytes = torch.cuda.memory_allocated(self.gpu_id)
+            reserved_bytes = torch.cuda.memory_reserved(self.gpu_id)
+            if phase == "after":
+                peak_allocated_bytes = torch.cuda.max_memory_allocated(self.gpu_id)
+                peak_reserved_bytes = torch.cuda.max_memory_reserved(self.gpu_id)
+        except Exception:
+            logger.debug("Failed to query per-batch GPU memory usage.", exc_info=True)
+            return
+
+        gib = float(1 << 30)
+        if phase == "after":
+            logger.info(
+                "Batch %d %s mode=%s bs=%d GPU memory: free=%.2f GiB allocated=%.2f GiB reserved=%.2f GiB peak_allocated=%.2f GiB peak_reserved=%.2f GiB total=%.2f GiB",
+                self.forward_ct,
+                phase,
+                batch.forward_mode.name,
+                batch.batch_size(),
+                free_bytes / gib,
+                allocated_bytes / gib,
+                reserved_bytes / gib,
+                peak_allocated_bytes / gib,
+                peak_reserved_bytes / gib,
+                total_bytes / gib,
+            )
+        else:
+            logger.info(
+                "Batch %d %s mode=%s bs=%d GPU memory: free=%.2f GiB allocated=%.2f GiB reserved=%.2f GiB total=%.2f GiB",
+                self.forward_ct,
+                phase,
+                batch.forward_mode.name,
+                batch.batch_size(),
+                free_bytes / gib,
+                allocated_bytes / gib,
+                reserved_bytes / gib,
+                total_bytes / gib,
+            )
 
     def launch_batch_sample_if_needed(
         self, batch_result: GenerationBatchResult
