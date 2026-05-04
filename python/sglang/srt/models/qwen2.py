@@ -180,7 +180,7 @@ class Qwen2Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
@@ -238,7 +238,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -323,15 +323,21 @@ class Qwen2Model(nn.Module):
         # For EAGLE3 support
         self.layers_to_capture = []
 
-        max_batch_size = get_global_server_args().max_running_requests
+        server_args = get_global_server_args()
+        max_batch_size = server_args.max_running_requests
         assert max_batch_size is not None, 'Expecting max_running_requests to be set for query buffer initialization.'
+
+        # Determine the layer range for attention heatmap query recording.
+        self.attention_heatmap_layer_start = server_args.attention_heatmap_layer_start if server_args.attention_heatmap_layer_start is not None else 0
+        self.attention_heatmap_layer_end = server_args.attention_heatmap_layer_end if server_args.attention_heatmap_layer_end is not None else config.num_hidden_layers
+        num_query_buffer_layers = self.attention_heatmap_layer_end - self.attention_heatmap_layer_start
 
         # this will store the queries for the current token
         self.register_buffer(
             'query_buffer',
             torch.zeros(
                 (
-                    config.num_hidden_layers,
+                    num_query_buffer_layers,
                     max_batch_size,  # we allocate capacity such that we can always record queries for all requests in the batch
                     config.hidden_size,  # num_q_heads * head_dim
                 ),
@@ -384,11 +390,16 @@ class Qwen2Model(nn.Module):
                 residual,
             )
 
+            # Only record queries for layers within the attention heatmap range.
+            if not (self.attention_heatmap_layer_start <= i < self.attention_heatmap_layer_end):
+                continue
+
             assert not forward_batch.forward_mode.is_mixed(), (
                 "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
             )
 
             batch_size = forward_batch.batch_size
+            buffer_idx = i - self.attention_heatmap_layer_start
             assert batch_size <= self.query_buffer.shape[1], 'Batch size exceeds query buffer capacity.'
 
             if forward_batch.forward_mode.is_decode():
@@ -396,7 +407,7 @@ class Qwen2Model(nn.Module):
                 We record the query used to generate the token for each request in the batch.
                 q: torch.Tensor of shape [batch_size, hidden_size]"""
                 assert q.ndim == 2 and q.shape == (batch_size, self.config.hidden_size)
-                self.query_buffer[i][:batch_size] = q
+                self.query_buffer[buffer_idx][:batch_size] = q
 
             elif forward_batch.forward_mode.is_extend():
                 """Extend mode: prefilling multiple requests together.
@@ -411,7 +422,7 @@ class Qwen2Model(nn.Module):
                 req_last_token_idx = -1
                 for req_idx, extend_len in enumerate(extend_seq_lens):
                     req_last_token_idx += extend_len
-                    self.query_buffer[i, req_idx] = q[req_last_token_idx]
+                    self.query_buffer[buffer_idx, req_idx] = q[req_last_token_idx]
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(

@@ -31,7 +31,6 @@ class EngineBase(ABC):
         data_parallel_rank: Optional[int] = None,
         rid: Optional[Union[List[str], str]] = None,
         output_attention_weights: bool = False,
-        chunked_attention_compute_size: Optional[int] = None,
     ) -> Union[Dict, Iterator[Dict]]:
         """Generate outputs based on given inputs."""
         pass

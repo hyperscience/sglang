@@ -166,7 +166,7 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if get_global_server_args().rl_on_policy_target is not None:
             hidden_states = hidden_states.bfloat16()
 
@@ -181,7 +181,7 @@ class Qwen3Attention(nn.Module):
 
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, q
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -257,13 +257,13 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Self Attention
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
         if hidden_states.shape[0] != 0:
-            hidden_states = self.self_attn(
+            hidden_states, q = self.self_attn(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
@@ -286,7 +286,7 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
-        return hidden_states, residual
+        return hidden_states, residual, q
 
 
 class Qwen3Model(Qwen2Model):

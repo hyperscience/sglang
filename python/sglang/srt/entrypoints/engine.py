@@ -186,7 +186,6 @@ class Engine(EngineBase):
         data_parallel_rank: Optional[int] = None,
         rid: Optional[Union[List[str], str]] = None,
         output_attention_weights: bool = False,
-        chunked_attention_compute_size: Optional[int] = None,
     ) -> Union[Dict, Iterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -223,7 +222,6 @@ class Engine(EngineBase):
             data_parallel_rank=data_parallel_rank,
             rid=rid,
             output_attention_weights=output_attention_weights,
-            chunked_attention_compute_size=chunked_attention_compute_size,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
@@ -272,7 +270,6 @@ class Engine(EngineBase):
         data_parallel_rank: Optional[int] = None,
         rid: Optional[Union[List[str], str]] = None,
         output_attention_weights: bool = False,
-        chunked_attention_compute_size: Optional[int] = None,
     ) -> Union[Dict, AsyncIterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -311,7 +308,6 @@ class Engine(EngineBase):
             data_parallel_rank=data_parallel_rank,
             rid=rid,
             output_attention_weights=output_attention_weights,
-            chunked_attention_compute_size=chunked_attention_compute_size,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
