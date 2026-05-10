@@ -19,7 +19,7 @@ class RequestOutputTokenQueryBuffer:
     # A new token is generated for the last prefill and each decode forward pass.
     queries: list[torch.Tensor] = field(
         default_factory=list
-    )  # list[torch.Tensor((num_hidden_layers, hidden_size))]]
+    )  # list[torch.Tensor((num_selected_layers, hidden_size))]]
 
 
 
@@ -115,34 +115,41 @@ def compute_attn_weights_for_request(
     ],  # [num_layers, KV cache size, num_k_heads, head_dim]
     req_query_buffer: list[
         list[torch.Tensor]
-    ],  # [num_output_tokens, num_layers, (num_q_heads * head_dim)]
+    ],  # [num_output_tokens, num_selected_layers, (num_q_heads * head_dim)]
     req_prompt_token_indices: list[int],  # indices of prompt tokens in the KV cache
     page_size: int,
-    chunked_attention_compute_size: Optional[int],
+    chunked_attention_heatmap_size: Optional[int],
+    attention_heatmap_layer_start: int,
+    attention_heatmap_layer_end: int,
 ) -> list[list[torch.Tensor]]:
     assert page_size == 1, "Implemented only for page_size == 1"
-    assert len(key_cache_buffer) == len(req_query_buffer[0]), (
-        "Expecting same number of layers."
+
+    num_selected_layers = attention_heatmap_layer_end - attention_heatmap_layer_start
+    assert num_selected_layers == len(req_query_buffer[0]), (
+        f"Expecting query buffer to have {num_selected_layers} layers "
+        f"(range [{attention_heatmap_layer_start}, {attention_heatmap_layer_end})), "
+        f"but got {len(req_query_buffer[0])}."
     )
 
-    num_layers = len(key_cache_buffer)
     num_output_tokens = len(req_query_buffer)
     num_prompt_tokens = len(req_prompt_token_indices)
 
     layers_attn_weights_per_token: list[list[torch.Tensor]] | None = None
 
-    for layer_id in range(num_layers):
+    for buffer_idx in range(num_selected_layers):
+        actual_layer_id = attention_heatmap_layer_start + buffer_idx
+
         # Prepare Keys [num_prompt_tokens, num_k_heads, head_dim]
-        keys_base = key_cache_buffer[layer_id][req_prompt_token_indices, :, :]
+        keys_base = key_cache_buffer[actual_layer_id][req_prompt_token_indices, :, :]
         num_k_heads, head_dim = keys_base.shape[-2:]
 
         # Reconstruct Queries [num_output_tokens, num_q_heads, head_dim]
-        query_last_dimension = req_query_buffer[0][layer_id].shape[-1]
+        query_last_dimension = req_query_buffer[0][buffer_idx].shape[-1]
         num_q_heads = query_last_dimension // head_dim
 
         all_querys = torch.concat(
             [
-                query[layer_id].reshape(1, num_q_heads, head_dim)
+                query[buffer_idx].reshape(1, num_q_heads, head_dim)
                 for query in req_query_buffer
             ],
             axis=0,
@@ -157,7 +164,7 @@ def compute_attn_weights_for_request(
         keys_bmm = keys_base.permute(1, 2, 0).to(torch.float32)
 
         # Process attention scores in chunks (or all at once if chunk_size is None)
-        chunk_size = chunked_attention_compute_size or num_output_tokens
+        chunk_size = chunked_attention_heatmap_size or num_output_tokens
 
         # Pre-allocate the result tensor for this layer on CPU
         layer_scores_cpu = torch.empty(

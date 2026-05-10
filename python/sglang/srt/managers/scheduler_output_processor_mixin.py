@@ -371,7 +371,9 @@ class SchedulerOutputProcessorMixin:
                         req_query_buffer=req_query_buffer,
                         req_prompt_token_indices=req_prompt_token_indices,
                         page_size=self.page_size,
-                        chunked_attention_compute_size=req.chunked_attention_compute_size,
+                        chunked_attention_heatmap_size=self.server_args.chunked_attention_heatmap_size,
+                        attention_heatmap_layer_start=self.server_args.attention_heatmap_layer_start or 0,
+                        attention_heatmap_layer_end=self.server_args.attention_heatmap_layer_end or len(self.token_to_kv_pool_allocator._kvcache.k_buffer),
                     )
                     flattened_attention_all_tokens = list(
                         map(aggregate_attentions, layers_attn_weights)
@@ -388,7 +390,8 @@ class SchedulerOutputProcessorMixin:
                         f"Compute attention weights, "
                         f"#input-token: {len(req_prompt_token_indices)}, "
                         f"#output-token: {len(req.output_ids)}, "
-                        f"chunk-size: {req.chunked_attention_compute_size}, "
+                        f"layer-range: [{self.server_args.attention_heatmap_layer_start or 0}, {self.server_args.attention_heatmap_layer_end or len(self.token_to_kv_pool_allocator._kvcache.k_buffer)}), "
+                        f"chunk-size: {self.server_args.chunked_attention_heatmap_size}, "
                         f"query-buffer: {int(query_buffer_mb)} MiB, "
                         f"VRAM-alloc-peak-increase: {int(peak_alloc_increase)} MiB, "
                         f"VRAM-reserved-peak-increase: {int(peak_reserved_increase)} MiB, "

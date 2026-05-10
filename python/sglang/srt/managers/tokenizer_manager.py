@@ -871,7 +871,6 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 priority=obj.priority,
                 extra_key=obj.extra_key,
                 output_attention_weights=obj.output_attention_weights,
-                chunked_attention_compute_size=obj.chunked_attention_compute_size,
             )
         elif isinstance(obj, EmbeddingReqInput):
             tokenized_obj = TokenizedEmbeddingReqInput(
