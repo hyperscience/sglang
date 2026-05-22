@@ -26,14 +26,7 @@ def _resolve_future_token_ids_native(input_ids, future_token_ids_map):
     )
 
 
-if _is_cuda or _is_hip:
-    from sglang.jit_kernel.resolve_future_token_ids import (
-        resolve_future_token_ids_cuda,
-    )
-
-    _resolve_future_token_ids = resolve_future_token_ids_cuda
-else:
-    _resolve_future_token_ids = _resolve_future_token_ids_native
+_resolve_future_token_ids = _resolve_future_token_ids_native
 
 
 @dataclass
