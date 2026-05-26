@@ -110,25 +110,30 @@ def get_req_query_buffer_mb(
 
 
 def compute_attn_weights_for_request(
-    key_cache_buffer: list[
+    selected_key_cache: list[
         torch.Tensor
-    ],  # [num_layers, KV cache size, num_k_heads, head_dim]
+    ],  # [num_selected_layers, KV cache size, num_k_heads, head_dim]
     req_query_buffer: list[
         list[torch.Tensor]
     ],  # [num_output_tokens, num_selected_layers, (num_q_heads * head_dim)]
     req_prompt_token_indices: list[int],  # indices of prompt tokens in the KV cache
     page_size: int,
     chunked_attention_heatmap_size: Optional[int],
-    attention_heatmap_layer_start: int,
-    attention_heatmap_layer_end: int,
 ) -> list[list[torch.Tensor]]:
+    """Compute per-(output-token, prompt-token) attention weights for each
+    layer recorded in the query buffer.
+
+    `selected_key_cache[buffer_idx]` must hold the key cache for the same
+    model layer as query-buffer slot `buffer_idx`. The caller is
+    responsible for filtering / remapping the underlying KV pool (e.g.
+    `HybridLinearKVPool` only stores keys for full-attention layers).
+    """
     assert page_size == 1, "Implemented only for page_size == 1"
 
-    num_selected_layers = attention_heatmap_layer_end - attention_heatmap_layer_start
+    num_selected_layers = len(selected_key_cache)
     assert num_selected_layers == len(req_query_buffer[0]), (
         f"Expecting query buffer to have {num_selected_layers} layers "
-        f"(range [{attention_heatmap_layer_start}, {attention_heatmap_layer_end})), "
-        f"but got {len(req_query_buffer[0])}."
+        f"(matching selected_key_cache), but got {len(req_query_buffer[0])}."
     )
 
     num_output_tokens = len(req_query_buffer)
@@ -137,10 +142,8 @@ def compute_attn_weights_for_request(
     layers_attn_weights_per_token: list[list[torch.Tensor]] | None = None
 
     for buffer_idx in range(num_selected_layers):
-        actual_layer_id = attention_heatmap_layer_start + buffer_idx
-
         # Prepare Keys [num_prompt_tokens, num_k_heads, head_dim]
-        keys_base = key_cache_buffer[actual_layer_id][req_prompt_token_indices, :, :]
+        keys_base = selected_key_cache[buffer_idx][req_prompt_token_indices, :, :]
         num_k_heads, head_dim = keys_base.shape[-2:]
 
         # Reconstruct Queries [num_output_tokens, num_q_heads, head_dim]

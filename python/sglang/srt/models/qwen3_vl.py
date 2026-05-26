@@ -1040,14 +1040,14 @@ class Qwen3LLMModel(Qwen3Model):
                 post_residual_addition=deepstack_embeds,
             )
 
-            # Only record queries for layers within the attention heatmap range.
-            if self.attention_heatmap_layer_start <= layer_idx < self.attention_heatmap_layer_end:
+            # Only record queries for layers within the attention heatmap selection.
+            buffer_idx = self._heatmap_layer_id_to_buffer_idx.get(layer_idx)
+            if buffer_idx is not None:
                 assert not forward_batch.forward_mode.is_mixed(), (
                     "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
                 )
 
                 batch_size = forward_batch.batch_size
-                buffer_idx = layer_idx - self.attention_heatmap_layer_start
                 assert batch_size <= self.query_buffer.shape[1], 'Batch size exceeds query buffer capacity.'
 
                 if forward_batch.forward_mode.is_decode():

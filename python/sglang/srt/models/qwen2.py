@@ -332,10 +332,19 @@ class Qwen2Model(nn.Module):
         max_batch_size = server_args.max_running_requests
         assert max_batch_size is not None, 'Expecting max_running_requests to be set for query buffer initialization.'
 
-        # Determine the layer range for attention heatmap query recording.
-        self.attention_heatmap_layer_start = server_args.attention_heatmap_layer_start if server_args.attention_heatmap_layer_start is not None else 0
-        self.attention_heatmap_layer_end = server_args.attention_heatmap_layer_end if server_args.attention_heatmap_layer_end is not None else config.num_hidden_layers
-        num_query_buffer_layers = self.attention_heatmap_layer_end - self.attention_heatmap_layer_start
+        # Determine the layer ids for attention heatmap query recording.
+        # Layer ids refer to the original model layer space. None means all
+        # layers.
+        self.attention_heatmap_layer_ids: list[int] = (
+            list(server_args.attention_heatmap_layer_ids)
+            if server_args.attention_heatmap_layer_ids is not None
+            else list(range(config.num_hidden_layers))
+        )
+        self._heatmap_layer_id_to_buffer_idx: dict[int, int] = {
+            layer_id: buffer_idx
+            for buffer_idx, layer_id in enumerate(self.attention_heatmap_layer_ids)
+        }
+        num_query_buffer_layers = len(self.attention_heatmap_layer_ids)
 
         # this will store the queries for the current token
         self.register_buffer(
@@ -395,8 +404,9 @@ class Qwen2Model(nn.Module):
                 residual,
             )
 
-            # Only record queries for layers within the attention heatmap range.
-            if not (self.attention_heatmap_layer_start <= i < self.attention_heatmap_layer_end):
+            # Only record queries for layers within the attention heatmap selection.
+            buffer_idx = self._heatmap_layer_id_to_buffer_idx.get(i)
+            if buffer_idx is None:
                 continue
 
             assert not forward_batch.forward_mode.is_mixed(), (
@@ -404,7 +414,6 @@ class Qwen2Model(nn.Module):
             )
 
             batch_size = forward_batch.batch_size
-            buffer_idx = i - self.attention_heatmap_layer_start
             assert batch_size <= self.query_buffer.shape[1], 'Batch size exceeds query buffer capacity.'
 
             if forward_batch.forward_mode.is_decode():
