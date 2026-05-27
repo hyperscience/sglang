@@ -37,6 +37,7 @@ from sglang.srt.configs.qwen3_5 import (
 from sglang.srt.distributed import get_pp_group
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+from sglang.srt.hs.attention_heatmap import AttentionHeatmapQueryRecorderMixin
 
 # Layers - Attention
 from sglang.srt.layers.attention.fla.layernorm_gated import RMSNorm as RMSNormGated
@@ -932,7 +933,7 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
-class Qwen3_5ForCausalLM(nn.Module):
+class Qwen3_5ForCausalLM(AttentionHeatmapQueryRecorderMixin, nn.Module):
     """Qwen3.5 Model with support for dense variant."""
 
     packed_modules_mapping = {
@@ -1059,41 +1060,10 @@ class Qwen3_5ForCausalLM(nn.Module):
 
         self.layers_to_capture = []
 
-        server_args = get_global_server_args()
-        max_batch_size = server_args.max_running_requests
-        assert max_batch_size is not None, 'Expecting max_running_requests to be set for query buffer initialization.'
-
-        # Determine the layer ids for attention heatmap query recording.
-        # Layer ids refer to the original model layer space; non-full-attention
-        # layers (e.g. linear attention) are silently filtered out because they
-        # have no K cache to attend over.
-        requested_layer_ids: list[int] = (
-            list(server_args.attention_heatmap_layer_ids)
-            if server_args.attention_heatmap_layer_ids is not None
-            else list(range(config.num_hidden_layers))
-        )
-        self.attention_heatmap_layer_ids: list[int] = [
-            i for i in requested_layer_ids if config.layers_block_type[i] == "attention"
-        ]
-        self._heatmap_layer_id_to_buffer_idx: dict[int, int] = {
-            layer_id: buffer_idx
-            for buffer_idx, layer_id in enumerate(self.attention_heatmap_layer_ids)
-        }
-        num_query_buffer_layers = len(self.attention_heatmap_layer_ids)
-
-        # this will store the queries for the current token
-        self.register_buffer(
-            'query_buffer',
-            torch.zeros(
-                (
-                    max(num_query_buffer_layers, 1),
-                    max_batch_size,  # we allocate capacity such that we can always record queries for all requests in the batch
-                    config.hidden_size,  # num_q_heads * head_dim
-                ),
-                dtype=config.torch_dtype,
-                device=torch.cuda.current_device(),
-            ),
-            persistent=False,
+        self._init_attention_heatmap_query_buffer(
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.hidden_size,
+            torch_dtype=config.torch_dtype,
         )
 
     def get_input_embeddings(self):
@@ -1170,40 +1140,7 @@ class Qwen3_5ForCausalLM(nn.Module):
                     ),
                 )
 
-                # Only record queries for full-attention layers within the
-                # requested heatmap range.
-                buffer_idx = self._heatmap_layer_id_to_buffer_idx.get(layer_idx)
-                if buffer_idx is None:
-                    continue
-
-                assert not forward_batch.forward_mode.is_mixed(), (
-                    "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
-                )
-
-                batch_size = forward_batch.batch_size
-                assert batch_size <= self.query_buffer.shape[1], 'Batch size exceeds query buffer capacity.'
-
-                if forward_batch.forward_mode.is_decode():
-                    """Decode mode: generating a single token for each request in the batch.
-                    We record the query used to generate the token for each request in the batch.
-                    q: torch.Tensor of shape [batch_size, hidden_size]"""
-                    assert q.ndim == 2 and q.shape == (batch_size, self.config.hidden_size)
-                    self.query_buffer[buffer_idx][:batch_size] = q
-
-                elif forward_batch.forward_mode.is_extend():
-                    """Extend mode: prefilling multiple requests together.
-                    q: torch.Tensor of shape [total_extend_tokens, hidden_size]
-                    We record the query for the last token of each request in the batch,
-                    as the query for the last token of the prompt will be used to generate the first output token."""
-                    extend_seq_lens = forward_batch.extend_seq_lens_cpu
-                    assert extend_seq_lens is not None
-                    assert len(extend_seq_lens) == batch_size
-                    assert q.ndim == 2 and q.shape == (sum(extend_seq_lens), self.config.hidden_size)
-
-                    req_last_token_idx = -1
-                    for req_idx, extend_len in enumerate(extend_seq_lens):
-                        req_last_token_idx += extend_len
-                        self.query_buffer[buffer_idx, req_idx] = q[req_last_token_idx]
+                self._record_query_for_layer(layer_idx, q, forward_batch)
 
             # Process deepstack embeddings if provided
             if (

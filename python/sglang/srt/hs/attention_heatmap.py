@@ -2,6 +2,7 @@ from typing import Optional
 
 from dataclasses import dataclass, field
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.server_args import get_global_server_args
 from collections import defaultdict
 
 
@@ -9,6 +10,103 @@ import numpy as np
 import torch
 
 MiB = 1024**2
+
+
+class AttentionHeatmapQueryRecorderMixin:
+    """Records per-layer attention queries into a `query_buffer` for attention
+    heatmap computation.
+
+    Call `_init_attention_heatmap_query_buffer` from the model's __init__, and
+    `_record_query_for_layer` from its forward loop once `q` is available.
+
+    Layer ids are taken verbatim from ``server_args.attention_heatmap_layer_ids``
+    (defaulting to all layers).
+    """
+
+    attention_heatmap_layer_ids: list[int]
+    _heatmap_layer_id_to_buffer_idx: dict[int, int]
+    query_buffer: torch.Tensor
+
+    def _init_attention_heatmap_query_buffer(
+        self,
+        *,
+        num_hidden_layers: int,
+        hidden_size: int,
+        torch_dtype: torch.dtype,
+    ) -> None:
+        server_args = get_global_server_args()
+        max_batch_size: Optional[int] = server_args.max_running_requests
+        assert max_batch_size is not None, (
+            "Expecting max_running_requests to be set for query buffer initialization."
+        )
+
+        self.attention_heatmap_layer_ids = (
+            list(server_args.attention_heatmap_layer_ids)
+            if server_args.attention_heatmap_layer_ids is not None
+            else list(range(num_hidden_layers))
+        )
+        self._heatmap_layer_id_to_buffer_idx = {
+            layer_id: buffer_idx
+            for buffer_idx, layer_id in enumerate(self.attention_heatmap_layer_ids)
+        }
+
+        num_query_buffer_layers = max(len(self.attention_heatmap_layer_ids), 1)
+        self.register_buffer(
+            "query_buffer",
+            torch.zeros(
+                (
+                    num_query_buffer_layers,
+                    max_batch_size,  # capacity for queries across all requests in the batch
+                    hidden_size,  # num_q_heads * head_dim
+                ),
+                dtype=torch_dtype,
+                device=torch.cuda.current_device(),
+            ),
+            persistent=False,
+        )
+
+    def _record_query_for_layer(
+        self,
+        layer_id: int,
+        q: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> None:
+        buffer_idx = self._heatmap_layer_id_to_buffer_idx.get(layer_id)
+        if buffer_idx is None:
+            return
+
+        assert not forward_batch.forward_mode.is_mixed(), (
+            "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
+        )
+
+        batch_size = forward_batch.batch_size
+        hidden_size = self.query_buffer.shape[-1]
+        assert batch_size <= self.query_buffer.shape[1], (
+            "Batch size exceeds query buffer capacity."
+        )
+
+        if forward_batch.forward_mode.is_decode():
+            # Decode mode: one new token per request. Record the query used to
+            # generate that token for each request in the batch.
+            # q: [batch_size, hidden_size]
+            assert q.ndim == 2 and q.shape == (batch_size, hidden_size)
+            self.query_buffer[buffer_idx][:batch_size] = q
+            return
+
+        if forward_batch.forward_mode.is_extend():
+            # Extend mode: prefilling multiple requests together. Record the
+            # query for the last token of each request, since that query will
+            # be used to generate the first output token.
+            # q: [total_extend_tokens, hidden_size]
+            extend_seq_lens = forward_batch.extend_seq_lens_cpu
+            assert extend_seq_lens is not None
+            assert len(extend_seq_lens) == batch_size
+            assert q.ndim == 2 and q.shape == (sum(extend_seq_lens), hidden_size)
+
+            req_last_token_idx = -1
+            for req_idx, extend_len in enumerate(extend_seq_lens):
+                req_last_token_idx += extend_len
+                self.query_buffer[buffer_idx, req_idx] = q[req_last_token_idx]
 
 
 @dataclass
