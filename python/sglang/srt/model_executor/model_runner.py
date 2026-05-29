@@ -98,6 +98,7 @@ from sglang.srt.eplb.expert_location import (
 )
 from sglang.srt.eplb.expert_location_updater import ExpertLocationUpdater
 from sglang.srt.hardware_backend.npu.graph_runner.npu_graph_runner import NPUGraphRunner
+from sglang.srt.hs.attention_heatmap import fill_output_token_query_buffer_for_batch
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.attention.attention_registry import (
     ATTENTION_BACKENDS,
@@ -3225,6 +3226,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            if forward_batch.output_attention_weights and any(forward_batch.output_attention_weights):
+                fill_output_token_query_buffer_for_batch(
+                    query_buffer=self.model.model.query_buffer,
+                    forward_batch=forward_batch,
+                )
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
         # For MLP sync
@@ -3260,6 +3266,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            if forward_batch.output_attention_weights and any(forward_batch.output_attention_weights):
+                fill_output_token_query_buffer_for_batch(
+                    query_buffer=self.model.model.query_buffer,
+                    forward_batch=forward_batch,
+                )
         elif forward_batch.forward_mode.is_split_prefill():
             ret = self.forward_split_prefill(
                 forward_batch,
@@ -3272,6 +3283,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            if forward_batch.output_attention_weights and any(forward_batch.output_attention_weights):
+                fill_output_token_query_buffer_for_batch(
+                    query_buffer=self.model.model.query_buffer,
+                    forward_batch=forward_batch,
+                )
         elif forward_batch.forward_mode.is_idle():
             ret = self.forward_idle(forward_batch, pp_proxy_tensors=pp_proxy_tensors)
         else:

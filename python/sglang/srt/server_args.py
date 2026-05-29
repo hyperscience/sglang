@@ -779,6 +779,17 @@ class ServerArgs:
     # For msProbe
     msprobe_dump_config: Optional[str] = None
 
+    # Attention heatmap layer range (inclusive start, exclusive end).
+    # Only layers in [start, end) are recorded in the query buffer and used for heatmap computation.
+    # None means all layers.
+    attention_heatmap_layer_start: Optional[int] = None
+    attention_heatmap_layer_end: Optional[int] = None
+
+    # Chunk size for attention heatmap computation.
+    # Controls how many output tokens are processed at once during attention weight computation.
+    # Smaller values reduce peak GPU memory usage. None means all output tokens at once.
+    chunked_attention_heatmap_size: Optional[int] = None
+
     def __post_init__(self):
         """
         Orchestrates the handling of various server arguments, ensuring proper configuration and validation.
@@ -4176,6 +4187,25 @@ class ServerArgs:
             if isinstance(self.preferred_sampling_params, str):
                 self.preferred_sampling_params = json.loads(
                     self.preferred_sampling_params
+                )
+
+        # Validate attention heatmap layer range.
+        if self.attention_heatmap_layer_start is not None or self.attention_heatmap_layer_end is not None:
+            if self.attention_heatmap_layer_start is not None and self.attention_heatmap_layer_end is not None:
+                if self.attention_heatmap_layer_start < 0:
+                    raise ValueError("attention_heatmap_layer_start must be >= 0")
+                if self.attention_heatmap_layer_end <= self.attention_heatmap_layer_start:
+                    raise ValueError(
+                        f"attention_heatmap_layer_end ({self.attention_heatmap_layer_end}) must be > "
+                        f"attention_heatmap_layer_start ({self.attention_heatmap_layer_start})"
+                    )
+            elif self.attention_heatmap_layer_start is not None and self.attention_heatmap_layer_end is None:
+                raise ValueError(
+                    "attention_heatmap_layer_end must be set when attention_heatmap_layer_start is set"
+                )
+            elif self.attention_heatmap_layer_end is not None and self.attention_heatmap_layer_start is None:
+                raise ValueError(
+                    "attention_heatmap_layer_start must be set when attention_heatmap_layer_end is set"
                 )
 
     def _handle_debug_utils(self):
