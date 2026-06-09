@@ -15,6 +15,7 @@ import torch
 from torch import nn
 
 from sglang.srt.environ import envs
+from sglang.srt.hs import vram_logging
 from sglang.srt.layers.multimodal import gpu_tensor_hash
 from sglang.srt.managers.schedule_batch import (
     CudaIpcTensorTransportProxy,
@@ -1034,6 +1035,8 @@ def general_mm_embed_routine(
                 if forward_batch.mm_inputs[i] is not None
             ]
             server_args = get_global_server_args()
+            _vlm_h = vram_logging.start_snapshot_peak()
+
             if server_args and server_args.enable_adaptive_dispatch_to_encoder:
                 # Split by precomputed vs non-precomputed so get_embedding_and_mask only sees uniform batches
                 input_embeds, other_info = _embed_mm_inputs_with_split(
@@ -1060,6 +1063,17 @@ def general_mm_embed_routine(
                     placeholder_tokens=placeholder_tokens,
                     use_deepstack=use_deepstack,
                 )
+
+            vram_logging.finish_snapshot_peak(
+                _vlm_h,
+                "vlm-embed",
+                only_on_growth=True,
+                num_reqs=len(mm_inputs_list),
+                num_items=sum(
+                    len([it for it in mi.mm_items if it is not None])
+                    for mi in mm_inputs_list
+                ),
+            )
 
             # add for qwen3_vl deepstack
             if use_deepstack:

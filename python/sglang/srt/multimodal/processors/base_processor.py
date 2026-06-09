@@ -12,6 +12,7 @@ import torch
 from PIL import Image
 from transformers import BaseImageProcessor
 
+from sglang.srt.hs import vram_logging
 from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
@@ -448,12 +449,20 @@ class BaseMultimodalProcessor(ABC):
                 npu_apply_qwen_image_preprocess_patch()
                 kwargs["device"] = "npu"
 
+        _vram_h = vram_logging.start_peak_tracker()
         result = processor.__call__(
             text=[input_text],
             padding=True,
             return_tensors="pt",
             **kwargs,
         )
+        vram_logging.finish_peak_tracker(
+            _vram_h,
+            "tokenizer-mm-preprocess",
+            only_on_growth=True,
+            device=kwargs.get("device", "cpu"),
+        )
+        vram_logging.log_budget(only_on_growth=True)
         if not self.server_args.keep_mm_feature_on_device:
             # move feature tensors to cpu
             for feature_name in self.FEATURE_NAMES:
