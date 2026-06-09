@@ -67,6 +67,7 @@ from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.dllm.mixin.scheduler import SchedulerDllmMixin
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+from sglang.srt.hs import vram_logging
 from sglang.srt.hs.attention_heatmap import maybe_drop_extra_query_due_to_overlap_scheduling
 from sglang.srt.layers.attention.mamba.ops import (
     initialize_mamba_selective_state_update_backend,
@@ -966,6 +967,7 @@ class Scheduler(
 
         embedding_cache_size = envs.SGLANG_VLM_CACHE_SIZE_MB.get()
         init_mm_embedding_cache(embedding_cache_size * 1024 * 1024)
+        vram_logging.log_static("mm-cache", size_mib=embedding_cache_size)
 
     def _get_draft_kv_pool(self):
         """Return (draft_token_to_kv_pool, draft_model_config) for the current
@@ -2927,6 +2929,8 @@ class Scheduler(
         if batch.forward_mode.is_prebuilt():
             return self._run_batch_prebuilt(batch)
 
+        _vram_h = vram_logging.start_peak_tracker()
+
         # Run forward
         if self.is_generation:
             if self.spec_algorithm.is_none() or self.enable_overlap:
@@ -3039,6 +3043,20 @@ class Scheduler(
         # Capture prefill end time for EXTEND mode
         if batch.forward_mode == ForwardMode.EXTEND:
             set_time_batch(batch.reqs, "set_prefill_run_batch_end_time")
+
+        vram_logging.finish_peak_tracker(
+            _vram_h,
+            (
+                "decode" if batch.forward_mode.is_decode()
+                else "prefill" if batch.forward_mode.is_extend()
+                else "idle" if batch.forward_mode.is_idle()
+                else str(batch.forward_mode)
+            ),
+            bs=(len(batch.reqs) if batch.reqs is not None else 0),
+            num_tokens=(
+                int(batch.seq_lens.sum().item()) if batch.seq_lens is not None else 0
+            ),
+        )
 
         if (
             self.server_args.enable_dp_attention

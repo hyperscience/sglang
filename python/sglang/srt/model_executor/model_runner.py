@@ -82,6 +82,7 @@ from sglang.srt.elastic_ep.elastic_ep import (
 )
 from sglang.srt.elastic_ep.expert_backup_client import ExpertBackupClient
 from sglang.srt.environ import envs
+from sglang.srt.hs import vram_logging
 from sglang.srt.eplb.eplb_manager import EPLBManager
 from sglang.srt.eplb.expert_distribution import (
     ExpertDistributionMetrics,
@@ -580,6 +581,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     def initialize(self, pre_model_load_memory: float):
         server_args = self.server_args
 
+        vram_logging.log_startup(
+            "startup", tp_rank=self.tp_rank, tp_size=self.tp_size
+        )
+
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=self.server_args.enable_memory_saver
         )
@@ -623,7 +628,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         # Load the model
         self.sampler = create_sampler()
+        _vram_h = vram_logging.start_alloc_delta()
         self.load_model()
+        vram_logging.finish_alloc_delta(_vram_h, "weights")
 
         # Load the expert backup client
         self.expert_backup_client = (
@@ -731,7 +738,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.configure_kv_cache_dtype()
 
         # Init memory pool and attention backends
+        _vram_h = vram_logging.start_alloc_delta()
         self.init_memory_pool(pre_model_load_memory)
+        vram_logging.finish_alloc_delta(_vram_h, "kv-pool")
 
         # Init ngram embedding token table
         self.maybe_init_ngram_embedding()
@@ -792,6 +801,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.init_piecewise_cuda_graphs()
 
         self.prealloc_symmetric_memory_pool()
+
+        vram_logging.log_baseline(
+            "baseline",
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            graph_capture_gb=float(self.graph_mem_usage),
+        )
 
     def init_routed_experts_capturer(self):
         if not self.server_args.disable_shared_experts_fusion and hasattr(

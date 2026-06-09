@@ -21,6 +21,7 @@ from typing import Dict, Iterable, List, Optional
 import torch
 
 from sglang.srt.configs.load_config import LoadConfig
+from sglang.srt.hs import vram_logging
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.utils import get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import (
@@ -694,6 +695,7 @@ class LoRAManager:
 
     def init_memory_pool(self):
         """(Re)initialize the LoRA memory pool based on the current configurations."""
+        _vram_h = vram_logging.start_alloc_delta()
         self.memory_pool = LoRAMemoryPool(
             base_hf_config=self.base_hf_config,
             max_loras_per_batch=self.max_loras_per_batch,
@@ -711,6 +713,12 @@ class LoRAManager:
 
         # Initializing memory pool with base model
         self.fetch_new_loras({None})
+        vram_logging.finish_alloc_delta(
+            _vram_h,
+            "lora-pool",
+            max_loras_per_batch=self.max_loras_per_batch,
+            max_lora_rank=self.max_lora_rank,
+        )
 
     def set_lora_module(self, module_name, module):
         """Wrap any module (standard or MoE) with LoRA support."""
