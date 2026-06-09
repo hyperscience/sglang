@@ -139,9 +139,21 @@ def log_startup(tag: str = "startup", **kv: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def start_peak_tracker() -> dict[str, Any] | None:
-    """Reset peak counters and snapshot baseline. Use for top-level forward."""
-    if not enabled():
+def start_peak_tracker(active: bool = True) -> dict[str, Any] | None:
+    """Reset peak counters and snapshot baseline. Use for top-level forward.
+
+    Pass ``active=False`` to make this a no-op (returns ``None``). Useful for
+    throttled loops (e.g. the decode hot loop) where the caller only wants to
+    emit at fixed intervals — the matching ``finish_peak_tracker`` is also a
+    no-op when handed a ``None`` handle.
+
+    Note: when called every iteration, the peak counter is reset every call,
+    so the reported peak is per-iteration. When throttled (active=False
+    between logged iters), the peak counter accumulates across the skipped
+    iters so the next logged iter reports the high-water of the whole
+    interval — which is usually what you want for VRAM ceiling tuning.
+    """
+    if not active or not enabled():
         return None
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
@@ -259,8 +271,8 @@ def finish_alloc_delta(
 
 
 @contextmanager
-def peak_tracker(tag: str, **kv: Any) -> Iterator[None]:
-    h = start_peak_tracker()
+def peak_tracker(tag: str, active: bool = True, **kv: Any) -> Iterator[None]:
+    h = start_peak_tracker(active=active)
     try:
         yield
     finally:

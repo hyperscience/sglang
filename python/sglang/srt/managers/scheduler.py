@@ -2929,7 +2929,14 @@ class Scheduler(
         if batch.forward_mode.is_prebuilt():
             return self._run_batch_prebuilt(batch)
 
-        _vram_h = vram_logging.start_peak_tracker()
+        # Match throttling of the periodic "Decode batch ..." log: only emit
+        # VRAM[decode] on the iter where log_decode_stats will fire. The peak
+        # counter accumulates across skipped iters, so the logged value is the
+        # high-water of the whole decode_log_interval window.
+        _vram_emit = (not batch.forward_mode.is_decode()) or (
+            (self.forward_ct_decode + 1) % self.server_args.decode_log_interval == 0
+        )
+        _vram_h = vram_logging.start_peak_tracker(active=_vram_emit)
 
         # Run forward
         if self.is_generation:
