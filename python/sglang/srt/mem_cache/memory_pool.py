@@ -40,6 +40,7 @@ from sglang.jit_kernel.kvcache import can_use_store_cache, store_cache
 from sglang.srt.configs.mamba_utils import BaseLinearStateParams
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 from sglang.srt.environ import envs
+from sglang.srt.hs import vram_logging
 from sglang.srt.layers.attention.nsa import index_buf_accessor
 from sglang.srt.layers.attention.nsa.quant_k_cache import (
     quantize_k_cache,
@@ -250,6 +251,7 @@ class MambaPool:
             maybe_init_custom_mem_pool(device=self.device)
         )
 
+        _vram_h = vram_logging.start_alloc_delta()
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE), (
             torch.cuda.use_mem_pool(self.custom_mem_pool)
             if self.enable_custom_mem_pool
@@ -343,6 +345,15 @@ class MambaPool:
             )
             self.mem_usage = self.mamba_cache.mem_usage_bytes() / GB
             self.num_mamba_layers = num_mamba_layers
+        # slot 0 is a reserved padding slot, so the pool holds `size + 1` slots;
+        # its footprint is affine in max_mamba_cache_size, not proportional.
+        vram_logging.finish_alloc_delta(
+            _vram_h,
+            "mamba-pool",
+            mamba_size=size,
+            slots=size + 1,
+            num_layers=num_mamba_layers,
+        )
 
     def get_speculative_mamba2_params_all_layers(self) -> SpeculativeState:
         assert isinstance(self.mamba_cache, self.SpeculativeState)

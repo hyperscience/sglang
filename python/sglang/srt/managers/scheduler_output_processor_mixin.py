@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import torch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
+from sglang.srt.hs import vram_logging
 from sglang.srt.hs.attention_heatmap import (
     MiB,
     OUTPUT_TOKEN_QUERY_BUFFER,
@@ -588,6 +589,7 @@ class SchedulerOutputProcessorMixin:
 
 
                 # Track GPU memory before computation
+                _vram_h = vram_logging.start_peak_tracker()
                 torch.cuda.reset_peak_memory_stats()
                 alloc_before = torch.cuda.memory_allocated() / MiB
                 reserved_before = torch.cuda.memory_reserved() / MiB
@@ -661,6 +663,17 @@ class SchedulerOutputProcessorMixin:
                     f"time: {time.perf_counter() - start_time:.3f} s, "
                 )
                 logger.info(f)
+
+                vram_logging.finish_peak_tracker(
+                    _vram_h,
+                    "heatmap",
+                    only_on_growth=True,
+                    input_tokens=len(req_prompt_token_indices),
+                    output_tokens=len(req.output_ids),
+                    selected_layer_ids=selected_layer_ids,
+                    chunk_size=self.server_args.chunked_attention_heatmap_size,
+                    query_buffer_mib=int(query_buffer_mb),
+                )
 
                 # Explicitly release temporary references after finishing computation.
                 del req_query_buffer
