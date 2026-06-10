@@ -22,7 +22,7 @@ un-indented and the patches are pure insertions:
 - ``log_startup(tag, **kv)``          — emit the very first baseline (call as
                                          early as possible in the process)
 - ``log_baseline(tag, **kv)``         — point-in-time steady-state snapshot
-                                         (adds free/total/activation_budget)
+                                         (adds free/total)
 - ``log_static(tag, **kv)``           — checkpoint line for config values
 - ``start_peak_tracker()`` / ``finish_peak_tracker(h, tag, **kv)``
                                        — resets peak; for top-level forward
@@ -40,7 +40,6 @@ Each tag becomes ``VRAM[<tag>]`` in the log line.
 from __future__ import annotations
 
 import logging
-import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -106,7 +105,7 @@ def log_static(tag: str, **kv: Any) -> None:
 
 
 def log_baseline(tag: str = "baseline", **kv: Any) -> None:
-    """Detailed steady-state snapshot with free/total VRAM and activation budget.
+    """Detailed steady-state snapshot with free/total VRAM.
 
     Use at major milestones (post-init, after weights, etc.). Also includes
     the standard absolute suffix so it chains with subsequent logs.
@@ -115,13 +114,8 @@ def log_baseline(tag: str = "baseline", **kv: Any) -> None:
         return
     try:
         torch.cuda.synchronize()
-        alloc = torch.cuda.memory_allocated()
         free, total = torch.cuda.mem_get_info()
-        measured = (
-            f"free={int(free / _MiB)}MiB "
-            f"total={int(total / _MiB)}MiB "
-            f"=> activation_budget≈{int((total - alloc) / _MiB)}MiB"
-        )
+        measured = f"free={int(free / _MiB)}MiB total={int(total / _MiB)}MiB"
         _emit(tag, kv, measured)
     except Exception as e:
         logger.warning(f"VRAM[{tag}] log failed: {e}")
@@ -160,7 +154,6 @@ def start_peak_tracker(active: bool = True) -> dict[str, Any] | None:
     return {
         "alloc_before": torch.cuda.memory_allocated(),
         "reserved_before": torch.cuda.memory_reserved(),
-        "t0": time.perf_counter(),
     }
 
 
@@ -173,15 +166,13 @@ def finish_peak_tracker(
         torch.cuda.synchronize()
         peak_alloc = torch.cuda.max_memory_allocated()
         peak_reserved = torch.cuda.max_memory_reserved()
-        dt_ms = (time.perf_counter() - handle["t0"]) * 1000.0
         measured = (
             f"alloc-before={int(handle['alloc_before'] / _MiB)}MiB "
             f"reserved-before={int(handle['reserved_before'] / _MiB)}MiB "
             f"peak-alloc={int(peak_alloc / _MiB)}MiB "
             f"peak-alloc-increase={int(max(0, peak_alloc - handle['alloc_before']) / _MiB)}MiB "
             f"peak-reserved={int(peak_reserved / _MiB)}MiB "
-            f"peak-reserved-increase={int(max(0, peak_reserved - handle['reserved_before']) / _MiB)}MiB "
-            f"time={dt_ms:.1f}ms"
+            f"peak-reserved-increase={int(max(0, peak_reserved - handle['reserved_before']) / _MiB)}MiB"
         )
         _emit(tag, kv, measured)
     except Exception as e:
@@ -197,7 +188,6 @@ def start_snapshot_peak() -> dict[str, Any] | None:
         "peak_before": torch.cuda.max_memory_allocated(),
         "alloc_before": torch.cuda.memory_allocated(),
         "reserved_before": torch.cuda.memory_reserved(),
-        "t0": time.perf_counter(),
     }
 
 
@@ -213,7 +203,6 @@ def finish_snapshot_peak(
         torch.cuda.synchronize()
         peak_alloc = torch.cuda.max_memory_allocated()
         peak_reserved = torch.cuda.max_memory_reserved()
-        dt_ms = (time.perf_counter() - handle["t0"]) * 1000.0
         measured = (
             f"alloc-before={int(handle['alloc_before'] / _MiB)}MiB "
             f"reserved-before={int(handle['reserved_before'] / _MiB)}MiB "
@@ -221,8 +210,7 @@ def finish_snapshot_peak(
             f"peak-alloc-increase={int(max(0, peak_alloc - handle['alloc_before']) / _MiB)}MiB "
             f"peak-contrib={int(max(0, peak_alloc - handle['peak_before']) / _MiB)}MiB "
             f"peak-reserved={int(peak_reserved / _MiB)}MiB "
-            f"peak-reserved-increase={int(max(0, peak_reserved - handle['reserved_before']) / _MiB)}MiB "
-            f"time={dt_ms:.1f}ms"
+            f"peak-reserved-increase={int(max(0, peak_reserved - handle['reserved_before']) / _MiB)}MiB"
         )
         _emit(tag, kv, measured)
     except Exception as e:
@@ -237,7 +225,6 @@ def start_alloc_delta() -> dict[str, Any] | None:
     return {
         "alloc_before": torch.cuda.memory_allocated(),
         "reserved_before": torch.cuda.memory_reserved(),
-        "t0": time.perf_counter(),
     }
 
 
@@ -250,13 +237,11 @@ def finish_alloc_delta(
         torch.cuda.synchronize()
         alloc_after = torch.cuda.memory_allocated()
         reserved_after = torch.cuda.memory_reserved()
-        dt_ms = (time.perf_counter() - handle["t0"]) * 1000.0
         measured = (
             f"alloc-before={int(handle['alloc_before'] / _MiB)}MiB "
             f"reserved-before={int(handle['reserved_before'] / _MiB)}MiB "
             f"alloc-delta={int((alloc_after - handle['alloc_before']) / _MiB)}MiB "
-            f"reserved-delta={int((reserved_after - handle['reserved_before']) / _MiB)}MiB "
-            f"time={dt_ms:.1f}ms"
+            f"reserved-delta={int((reserved_after - handle['reserved_before']) / _MiB)}MiB"
         )
         # _emit will append the absolute alloc=...MiB reserved=...MiB suffix
         # which equals (alloc_after, reserved_after).
