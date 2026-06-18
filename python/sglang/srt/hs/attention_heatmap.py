@@ -27,6 +27,13 @@ class AttentionHeatmapQueryRecorderMixin:
     _heatmap_layer_id_to_buffer_idx: tuple[Optional[int], ...]
     query_buffer: torch.Tensor
 
+    # Per-model softmax scaling applied to `Q @ K^T` during heatmap
+    # recomputation. Must match the model's `RadixAttention(scaling=...)`.
+    # `None` means "use the default `head_dim**-0.5`" (e.g. Qwen).
+    # Override in subclasses whose attention uses a different scaling
+    # (e.g. Gemma 4 uses `scaling=1.0`).
+    attention_score_scaling: Optional[float] = None
+
     def _init_attention_heatmap_query_buffer(
         self,
         *,
@@ -242,6 +249,7 @@ def compute_attn_weights_for_request(
     req_prompt_token_indices: list[int],  # indices of prompt tokens in the KV cache
     page_size: int,
     chunked_attention_heatmap_size: Optional[int],
+    attention_score_scaling: Optional[float] = None,
 ) -> list[list[torch.Tensor]]:
     """Compute per-(output-token, prompt-token) attention weights for each
     layer recorded in the query buffer.
@@ -250,6 +258,12 @@ def compute_attn_weights_for_request(
     model layer as query-buffer slot `buffer_idx`. The caller is
     responsible for filtering / remapping the underlying KV pool (e.g.
     `HybridLinearKVPool` only stores keys for full-attention layers).
+
+    `attention_score_scaling` is the scalar multiplier applied to ``Q @ K^T``
+    before the softmax. Pass the same value the model uses in its
+    ``RadixAttention(scaling=...)`` (e.g. ``1.0`` for Gemma 4). If
+    ``None``, defaults to ``head_dim**-0.5`` (the standard ``1/sqrt(d_k)``
+    scaling used by Qwen and most transformer models).
     """
     assert page_size == 1, "Implemented only for page_size == 1"
 
@@ -268,6 +282,12 @@ def compute_attn_weights_for_request(
         # Prepare Keys [num_prompt_tokens, num_k_heads, head_dim]
         keys_base = selected_key_cache[buffer_idx][req_prompt_token_indices, :, :]
         num_k_heads, head_dim = keys_base.shape[-2:]
+
+        layer_scaling = (
+            attention_score_scaling
+            if attention_score_scaling is not None
+            else head_dim**-0.5
+        )
 
         # Reconstruct Queries [num_output_tokens, num_q_heads, head_dim]
         query_last_dimension = req_query_buffer[0][buffer_idx].shape[-1]
@@ -307,7 +327,7 @@ def compute_attn_weights_for_request(
 
             # [num_q_heads, chunk_len, head_dim] @ [num_q_heads, head_dim, num_prompt_tokens]
             # Result: [num_q_heads, chunk_len, num_prompt_tokens]
-            chunk_scores = torch.bmm(query_chunk, keys_bmm) / (head_dim**0.5)
+            chunk_scores = torch.bmm(query_chunk, keys_bmm) * layer_scaling
 
             # Stable Softmax in float32
             chunk_scores = torch.softmax(chunk_scores, dim=-1)

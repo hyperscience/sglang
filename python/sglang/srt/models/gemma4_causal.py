@@ -690,6 +690,12 @@ class Gemma4TextModel(AttentionHeatmapQueryRecorderMixin, PreTrainedModel):
             torch_dtype=config.torch_dtype,
             valid_layer_ids=heatmap_valid_layer_ids,
         )
+        # Gemma 4's `RadixAttention` is instantiated with `scaling=1.0`
+        # (no `1/sqrt(d_k)` term). The heatmap recomputation must match
+        # the model's actual scaling, otherwise the softmax would be
+        # systematically flatter than what the model produced, yielding a
+        # near-uniform heatmap.
+        self.attention_score_scaling = 1.0
 
         self.post_init()
 

@@ -644,6 +644,9 @@ class SchedulerOutputProcessorMixin:
                     req_prompt_token_indices=req_prompt_token_indices,
                     page_size=self.page_size,
                     chunked_attention_heatmap_size=self.server_args.chunked_attention_heatmap_size,
+                    attention_score_scaling=getattr(
+                        heatmap_model, "attention_score_scaling", None
+                    ),
                 )
                 flattened_attention_all_tokens = list(
                     map(aggregate_attentions, layers_attn_weights)
