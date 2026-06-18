@@ -602,20 +602,10 @@ class SchedulerOutputProcessorMixin:
                 ].tolist()
 
                 # Pre-filter the key cache down to the layers whose queries
-                # are in the query buffer. Different KV pools store keys
-                # under different internal layouts:
-                #   - MHATokenToKVPool / MLATokenToKVPool: per-layer
-                #     `k_buffer` list, indexed by global layer id.
-                #   - HybridLinearKVPool: only stores keys for
-                #     full-attention layers, needs explicit remap.
-                #   - SWAKVPool: holds two sub-pools (full + SWA); the
-                #     pool's own mapping resolves a global layer id to
-                #     the right slot.
-                # All KVCache subclasses expose `get_key_buffer(layer_id)`
-                # which encapsulates the per-pool layout; we use it as the
-                # general path, and only special-case HybridLinearKVPool
-                # which needs an explicit remap into its full-attention
-                # sub-pool.
+                # are in the query buffer. `get_key_buffer(layer_id)` is the
+                # polymorphic accessor that handles MHA / MLA / SWA pools.
+                # `HybridLinearKVPool` needs an explicit remap because it
+                # only stores keys for full-attention layers.
                 from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
 
                 kvcache = self.token_to_kv_pool_allocator._kvcache

@@ -364,13 +364,9 @@ class Gemma4Attention(nn.Module):
             dummy_k = torch.zeros_like(q[:, : self.kv_size])
             q, _ = self.rotary_emb(positions, q, dummy_k)
 
-        # Capture the post-RoPE q (shape: [total_tokens, num_heads * head_dim])
-        # for attention-heatmap query recording before reshaping for attention.
-        recorded_q = q
-
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
+        attn_input = q.unflatten(-1, (self.num_heads, self.head_dim))
         attn_output = self.attn(
-            q,
+            attn_input,
             k,
             v,
             forward_batch=forward_batch,
@@ -380,7 +376,9 @@ class Gemma4Attention(nn.Module):
             attn_output = attn_output.flatten(-2, -1)
         output, _ = self.o_proj(attn_output)
 
-        return output, recorded_q
+        # `q` is post-RoPE [tokens, num_heads * head_dim], the shape the
+        # attention-heatmap mixin expects for query recording.
+        return output, q
 
 
 class Gemma4DecoderLayer(nn.Module):
@@ -670,13 +668,11 @@ class Gemma4TextModel(AttentionHeatmapQueryRecorderMixin, PreTrainedModel):
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Attention heatmap query recording is limited to layers with a
-        # usable, complete-prompt key cache: only full-attention layers
-        # (sliding-window layers may evict older keys) and only layers that
-        # store their own KV (KV-shared layers reuse another layer's keys).
-        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
-        first_kv_shared_layer_idx = (
-            config.num_hidden_layers - num_kv_shared_layers
+        # Heatmap recording is limited to layers with a complete-prompt key
+        # cache: full-attention layers that own their KV (SWA layers may
+        # evict, KV-shared layers reuse another layer's keys).
+        first_kv_shared_layer_idx = config.num_hidden_layers - getattr(
+            config, "num_kv_shared_layers", 0
         )
         heatmap_valid_layer_ids = [
             i
@@ -690,11 +686,8 @@ class Gemma4TextModel(AttentionHeatmapQueryRecorderMixin, PreTrainedModel):
             torch_dtype=config.torch_dtype,
             valid_layer_ids=heatmap_valid_layer_ids,
         )
-        # Gemma 4's `RadixAttention` is instantiated with `scaling=1.0`
-        # (no `1/sqrt(d_k)` term). The heatmap recomputation must match
-        # the model's actual scaling, otherwise the softmax would be
-        # systematically flatter than what the model produced, yielding a
-        # near-uniform heatmap.
+        # Mirror `Gemma4Attention.attn`'s `RadixAttention(..., 1, ...)`:
+        # Gemma 4 attention has no `1/sqrt(d_k)` term.
         self.attention_score_scaling = 1.0
 
         self.post_init()
@@ -806,13 +799,9 @@ class Gemma4TextModel(AttentionHeatmapQueryRecorderMixin, PreTrainedModel):
                 forward_batch=forward_batch,
                 **kwargs,
             )
-            hidden_states = layer_outputs[0]
-            residual = layer_outputs[1] if len(layer_outputs) > 1 else None
-            q = layer_outputs[2] if len(layer_outputs) > 2 else None
-            if q is not None:
-                # The mixin no-ops for layer ids that were filtered out at init
-                # (SWA, KV-shared, or not in the user-requested set).
-                self._record_query_for_layer(layer_idx, q, forward_batch)
+            hidden_states, residual, q = layer_outputs
+            # No-ops for layer ids filtered out at init (SWA / KV-shared / not requested).
+            self._record_query_for_layer(layer_idx, q, forward_batch)
 
         if residual is None:
             hidden_states = self.norm(hidden_states)

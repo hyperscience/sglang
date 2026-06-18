@@ -27,11 +27,10 @@ class AttentionHeatmapQueryRecorderMixin:
     _heatmap_layer_id_to_buffer_idx: tuple[Optional[int], ...]
     query_buffer: torch.Tensor
 
-    # Per-model softmax scaling applied to `Q @ K^T` during heatmap
-    # recomputation. Must match the model's `RadixAttention(scaling=...)`.
-    # `None` means "use the default `head_dim**-0.5`" (e.g. Qwen).
-    # Override in subclasses whose attention uses a different scaling
-    # (e.g. Gemma 4 uses `scaling=1.0`).
+    # Softmax scaling applied to `Q @ K^T` during heatmap recomputation.
+    # Must match the model's `RadixAttention(scaling=...)`. `None` ⇒
+    # default `head_dim**-0.5` (Qwen). Override in subclasses whose
+    # attention uses a different scaling (e.g. Gemma 4 uses `1.0`).
     attention_score_scaling: Optional[float] = None
 
     def _init_attention_heatmap_query_buffer(
@@ -48,30 +47,26 @@ class AttentionHeatmapQueryRecorderMixin:
             "Expecting max_running_requests to be set for query buffer initialization."
         )
 
-        # Optional per-model restriction on which layer ids may be recorded
-        # (e.g. only full-attention non-KV-shared layers for Gemma 4).
-        valid_layer_ids_set: Optional[set[int]] = (
+        # Optional per-model restriction (e.g. Gemma 4 only records
+        # full-attention non-KV-shared layers).
+        valid_set: Optional[set[int]] = (
             set(valid_layer_ids) if valid_layer_ids is not None else None
         )
+        requested = server_args.attention_heatmap_layer_ids
 
-        if server_args.attention_heatmap_layer_ids is not None:
-            requested_ids = list(server_args.attention_heatmap_layer_ids)
-            if valid_layer_ids_set is not None:
-                invalid_ids = [
-                    layer_id
-                    for layer_id in requested_ids
-                    if layer_id not in valid_layer_ids_set
-                ]
-                if invalid_ids:
+        if requested is not None:
+            requested = list(requested)
+            if valid_set is not None:
+                invalid = [i for i in requested if i not in valid_set]
+                if invalid:
                     raise ValueError(
                         f"attention_heatmap_layer_ids contains layer ids "
-                        f"{invalid_ids} that are not supported by this model "
-                        f"(supported ids: {sorted(valid_layer_ids_set)})."
+                        f"{invalid} that are not supported by this model "
+                        f"(supported ids: {sorted(valid_set)})."
                     )
-            self.attention_heatmap_layer_ids = requested_ids
-        elif valid_layer_ids_set is not None:
-            # Default to all model-supported layers rather than every layer.
-            self.attention_heatmap_layer_ids = sorted(valid_layer_ids_set)
+            self.attention_heatmap_layer_ids = requested
+        elif valid_set is not None:
+            self.attention_heatmap_layer_ids = sorted(valid_set)
         else:
             self.attention_heatmap_layer_ids = list(range(num_hidden_layers))
         # Tuple indexed by layer_id (not a dict) so the lookup in
@@ -259,11 +254,9 @@ def compute_attn_weights_for_request(
     responsible for filtering / remapping the underlying KV pool (e.g.
     `HybridLinearKVPool` only stores keys for full-attention layers).
 
-    `attention_score_scaling` is the scalar multiplier applied to ``Q @ K^T``
-    before the softmax. Pass the same value the model uses in its
-    ``RadixAttention(scaling=...)`` (e.g. ``1.0`` for Gemma 4). If
-    ``None``, defaults to ``head_dim**-0.5`` (the standard ``1/sqrt(d_k)``
-    scaling used by Qwen and most transformer models).
+    `attention_score_scaling` is the scalar applied to ``Q @ K^T`` before
+    the softmax — pass the model's `RadixAttention(scaling=...)` value
+    (e.g. `1.0` for Gemma 4). `None` defaults to `head_dim**-0.5`.
     """
     assert page_size == 1, "Implemented only for page_size == 1"
 
