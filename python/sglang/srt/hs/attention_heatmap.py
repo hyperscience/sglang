@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Iterable, Optional
 
 from dataclasses import dataclass, field
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -33,6 +33,7 @@ class AttentionHeatmapQueryRecorderMixin:
         num_hidden_layers: int,
         hidden_size: int,
         torch_dtype: torch.dtype,
+        valid_layer_ids: Optional[Iterable[int]] = None,
     ) -> None:
         server_args = get_global_server_args()
         max_batch_size: Optional[int] = server_args.max_running_requests
@@ -40,11 +41,32 @@ class AttentionHeatmapQueryRecorderMixin:
             "Expecting max_running_requests to be set for query buffer initialization."
         )
 
-        self.attention_heatmap_layer_ids = (
-            list(server_args.attention_heatmap_layer_ids)
-            if server_args.attention_heatmap_layer_ids is not None
-            else list(range(num_hidden_layers))
+        # Optional per-model restriction on which layer ids may be recorded
+        # (e.g. only full-attention non-KV-shared layers for Gemma 4).
+        valid_layer_ids_set: Optional[set[int]] = (
+            set(valid_layer_ids) if valid_layer_ids is not None else None
         )
+
+        if server_args.attention_heatmap_layer_ids is not None:
+            requested_ids = list(server_args.attention_heatmap_layer_ids)
+            if valid_layer_ids_set is not None:
+                invalid_ids = [
+                    layer_id
+                    for layer_id in requested_ids
+                    if layer_id not in valid_layer_ids_set
+                ]
+                if invalid_ids:
+                    raise ValueError(
+                        f"attention_heatmap_layer_ids contains layer ids "
+                        f"{invalid_ids} that are not supported by this model "
+                        f"(supported ids: {sorted(valid_layer_ids_set)})."
+                    )
+            self.attention_heatmap_layer_ids = requested_ids
+        elif valid_layer_ids_set is not None:
+            # Default to all model-supported layers rather than every layer.
+            self.attention_heatmap_layer_ids = sorted(valid_layer_ids_set)
+        else:
+            self.attention_heatmap_layer_ids = list(range(num_hidden_layers))
         # Tuple indexed by layer_id (not a dict) so the lookup in
         # `_record_query_for_layer` stays constant-foldable under
         # torch.compile / CUDA graph capture.

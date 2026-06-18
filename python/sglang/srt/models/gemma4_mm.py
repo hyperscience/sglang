@@ -224,6 +224,13 @@ class Gemma4ForConditionalGeneration(PreTrainedModel):
 
         self.post_init()
 
+    @property
+    def model(self) -> "Gemma4TextModel":
+        # Alias used by the scheduler / output-processor to reach the
+        # attention-heatmap mixin attributes via
+        # `model_runner.model.model.attention_heatmap_layer_ids`.
+        return self.language_model
+
     def pad_input_ids(
         self,
         input_ids: List[int],

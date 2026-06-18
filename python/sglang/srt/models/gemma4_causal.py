@@ -27,6 +27,7 @@ from transformers import (
 from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
 )
+from sglang.srt.hs.attention_heatmap import AttentionHeatmapQueryRecorderMixin
 from sglang.srt.layers.gemma4_fused_ops import gemma_rmsnorm_residual_scalar
 from sglang.srt.layers.layernorm import Gemma4RMSNorm, RMSNorm
 from sglang.srt.layers.linear import (
@@ -332,7 +333,7 @@ class Gemma4Attention(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         **kwargs,
-    ):
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -363,6 +364,10 @@ class Gemma4Attention(nn.Module):
             dummy_k = torch.zeros_like(q[:, : self.kv_size])
             q, _ = self.rotary_emb(positions, q, dummy_k)
 
+        # Capture the post-RoPE q (shape: [total_tokens, num_heads * head_dim])
+        # for attention-heatmap query recording before reshaping for attention.
+        recorded_q = q
+
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
         attn_output = self.attn(
             q,
@@ -375,7 +380,7 @@ class Gemma4Attention(nn.Module):
             attn_output = attn_output.flatten(-2, -1)
         output, _ = self.o_proj(attn_output)
 
-        return output
+        return output, recorded_q
 
 
 class Gemma4DecoderLayer(nn.Module):
@@ -511,7 +516,9 @@ class Gemma4DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]
+        torch.FloatTensor,
+        Optional[tuple[torch.FloatTensor, torch.FloatTensor]],
+        torch.Tensor,
     ]:
         # Gemma4 residual pattern following JAX implementation:
         # 1. input_norm(x) -> attn -> post_attn_norm -> ADD residual
@@ -526,7 +533,7 @@ class Gemma4DecoderLayer(nn.Module):
 
         # Apply input layernorm
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        hidden_states, q = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
@@ -587,10 +594,10 @@ class Gemma4DecoderLayer(nn.Module):
                 hidden_states = hidden_states + per_layer_contribution
 
             hidden_states = hidden_states * self.layer_scalar
-        return hidden_states, None
+        return hidden_states, None, q
 
 
-class Gemma4TextModel(PreTrainedModel):
+class Gemma4TextModel(AttentionHeatmapQueryRecorderMixin, PreTrainedModel):
     def __init__(
         self,
         config: Gemma4TextConfig,
@@ -662,6 +669,28 @@ class Gemma4TextModel(PreTrainedModel):
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # Attention heatmap query recording is limited to layers with a
+        # usable, complete-prompt key cache: only full-attention layers
+        # (sliding-window layers may evict older keys) and only layers that
+        # store their own KV (KV-shared layers reuse another layer's keys).
+        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        first_kv_shared_layer_idx = (
+            config.num_hidden_layers - num_kv_shared_layers
+        )
+        heatmap_valid_layer_ids = [
+            i
+            for i in range(config.num_hidden_layers)
+            if config.layer_types[i] == "full_attention"
+            and i < first_kv_shared_layer_idx
+        ]
+        self._init_attention_heatmap_query_buffer(
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.num_attention_heads * config.head_dim,
+            torch_dtype=config.torch_dtype,
+            valid_layer_ids=heatmap_valid_layer_ids,
+        )
+
         self.post_init()
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -773,6 +802,11 @@ class Gemma4TextModel(PreTrainedModel):
             )
             hidden_states = layer_outputs[0]
             residual = layer_outputs[1] if len(layer_outputs) > 1 else None
+            q = layer_outputs[2] if len(layer_outputs) > 2 else None
+            if q is not None:
+                # The mixin no-ops for layer ids that were filtered out at init
+                # (SWA, KV-shared, or not in the user-requested set).
+                self._record_query_for_layer(layer_idx, q, forward_batch)
 
         if residual is None:
             hidden_states = self.norm(hidden_states)
