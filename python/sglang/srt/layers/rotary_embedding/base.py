@@ -100,7 +100,7 @@ class RotaryEmbedding(MultiPlatformOp):
         self._apply_rotary_emb_wrapped = apply_rotary_emb
 
         # XXX (MUSA): Implement sgl_kernel.rotary_embedding support for MUSA backend
-        if get_global_server_args().rl_on_policy_target is not None or _is_musa:
+        if get_global_server_args().rl_on_policy_target is not None or _is_musa or get_bool_env_var("SGLANG_DISABLE_JIT_ROPE"):
             self._forward_method = self.forward_native
             self._apply_rotary_emb_wrapped = torch.compile(dynamic=True)(
                 apply_rotary_emb
