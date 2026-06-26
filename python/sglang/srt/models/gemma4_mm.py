@@ -224,6 +224,11 @@ class Gemma4ForConditionalGeneration(PreTrainedModel):
 
         self.post_init()
 
+    @property
+    def model(self) -> "Gemma4TextModel":
+        # Scheduler reaches the heatmap mixin via `model_runner.model.model`.
+        return self.language_model
+
     def pad_input_ids(
         self,
         input_ids: List[int],
