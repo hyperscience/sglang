@@ -457,8 +457,12 @@ class BaseMultimodalProcessor(ABC):
             **kwargs,
         )
         vram_logging.finish_peak_tracker(
-            _vram_h, "tokenizer-mm-preprocess", device=kwargs.get("device", "cpu")
+            _vram_h,
+            "tokenizer-mm-preprocess",
+            only_on_growth=True,
+            device=kwargs.get("device", "cpu"),
         )
+        vram_logging.log_budget(only_on_growth=True)
         if not self.server_args.keep_mm_feature_on_device:
             # move feature tensors to cpu
             for feature_name in self.FEATURE_NAMES:

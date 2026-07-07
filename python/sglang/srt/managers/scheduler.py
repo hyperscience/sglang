@@ -3059,11 +3059,13 @@ class Scheduler(
                 else "idle" if batch.forward_mode.is_idle()
                 else str(batch.forward_mode)
             ),
+            only_on_growth=True,
             bs=(len(batch.reqs) if batch.reqs is not None else 0),
             num_tokens=(
                 int(batch.seq_lens.sum().item()) if batch.seq_lens is not None else 0
             ),
         )
+        vram_logging.log_budget(only_on_growth=True)
 
         if (
             self.server_args.enable_dp_attention

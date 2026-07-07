@@ -32,11 +32,21 @@ un-indented and the patches are pure insertions:
 
 - ``log_startup(tag, **kv)``          — emit the very first baseline (call as
                                          early as possible in the process)
-- ``log_baseline(tag, **kv)``         — point-in-time steady-state snapshot
-                                         (adds free/total)
+- ``log_baseline(tag, **kv)``         — point-in-time steady-state snapshot;
+                                         also marks the reserved watermark that
+                                         ``log_budget`` uses to split init vs
+                                         runtime
+- ``log_budget(tag, only_on_growth)`` — decompose reserved.total into named
+                                         contributors (the tuning artifact);
+                                         self-throttles on growth so it is safe
+                                         to call every hot-loop iteration
+- ``log_processes(tag, **kv)``        — NVML per-process board decomposition
+                                         (ctx.self + procs=[host_pid:used])
 - ``log_static(tag, **kv)``           — checkpoint line for config values
-- ``start_peak_tracker()`` / ``finish_peak_tracker(h, tag, **kv)``
-                                       — resets peak; for top-level forward
+- ``start_peak_tracker()`` / ``finish_peak_tracker(h, tag, only_on_growth=..)``
+                                       — resets peak; for top-level forward.
+                                         ``only_on_growth`` mutes flat repeats
+                                         (still attributes to the budget).
 - ``start_snapshot_peak()`` / ``finish_snapshot_peak(h, tag, **kv)``
                                        — no peak reset; for nested blocks
 - ``start_alloc_delta()`` / ``finish_alloc_delta(h, tag, **kv)``
@@ -52,6 +62,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import OrderedDict
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -98,22 +109,141 @@ def _gpu() -> tuple[int, int, int]:
     return (total_mib - free_mib, free_mib, total_mib)
 
 
-def _state_suffix() -> str:
+# ---------------------------------------------------------------------------
+# NVML per-process CUDA-context accounting
+# ---------------------------------------------------------------------------
+# torch.cuda.memory_* can't see the driver CUDA context (~300-700 MiB of
+# kernels/cublas/driver modules). NVML reports each PID's *total* committed
+# GPU memory, so:  context = nvml_used[pid] - torch.memory_reserved().
+_nvml_handle: Any = None
+_nvml_failed = False
+
+
+def _nvml_dev_handle() -> Any:
+    global _nvml_handle, _nvml_failed
+    if _nvml_failed:
+        return None
+    if _nvml_handle is None:
+        try:
+            import pynvml  # noqa: PLC0415
+
+            pynvml.nvmlInit()
+            _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(
+                torch.cuda.current_device()
+            )
+        except Exception:
+            _nvml_failed = True
+            return None
+    return _nvml_handle
+
+
+def _host_pid() -> int:
+    """PID as the driver/NVML sees it (outermost namespace).
+
+    Inside a PID namespace (containers) NVML reports host PIDs while
+    ``os.getpid()`` returns the namespaced PID; ``/proc/self/status`` NSpid
+    lists the host PID first.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("NSpid:"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return os.getpid()
+
+
+def _nvml_proc_table() -> dict[int, int] | None:
+    """{host_pid: used_MiB} for every compute process on this GPU, or None."""
+    h = _nvml_dev_handle()
+    if h is None:
+        return None
+    try:
+        import pynvml  # noqa: PLC0415
+
+        procs = pynvml.nvmlDeviceGetComputeRunningProcesses(h)
+    except Exception:
+        return None
+    table: dict[int, int] = {}
+    for p in procs:
+        used = getattr(p, "usedGpuMemory", None)
+        if used is not None:
+            table[int(p.pid)] = int(used / _MiB)
+    return table
+
+
+def _context_group() -> str:
+    """Best-effort NVML context accounting: ``ctx.self`` + ``procs`` list.
+
+    ``ctx.self`` = this process's NVML used memory minus its torch reserved
+    pool = the CUDA context (+ any non-torch cudaMalloc). ``procs`` lists every
+    compute PID's used MiB so both processes' totals are visible on one line.
+    Returns "" when NVML is unavailable or self-attribution fails.
+    """
+    table = _nvml_proc_table()
+    if not table:
+        return ""
+    reserved = int(torch.cuda.memory_reserved() / _MiB)
+    parts = []
+    self_used = table.get(_host_pid())
+    if self_used is not None:
+        parts.append(f"ctx.self={max(0, self_used - reserved)}")
+    procs = ",".join(f"{pid}:{used}" for pid, used in sorted(table.items()))
+    parts.append(f"procs=[{procs}]")
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Reserved-memory attribution ledger (per process)
+# ---------------------------------------------------------------------------
+# End goal: decompose each process's ``reserved.total`` into named contributors
+# so KV-cache size and batch size can be tuned against the OOM ceiling.
+#
+# torch ``reserved`` is sticky (only grows), so we attribute its growth:
+#   - persistent one-shot allocations (weights/kv-pool/lora) -> exact ledger
+#   - transient forward phases (prefill/decode/heatmap/vlm-embed) share the
+#     caching pool and overlap, so we can't split the sticky lump cleanly; we
+#     record each phase's worst single-block reserved bump as *indicative*.
+_init_ledger: "OrderedDict[str, int]" = OrderedDict()  # exact persistent MiB
+_phase_hi: dict[str, int] = {}  # indicative per-phase hi-water MiB
+_baseline_reserved: int | None = None  # reserved.total at post-init baseline
+_last_budget_reserved: int = -1  # throttle for log_budget(only_on_growth=True)
+
+
+def _ledger_add(tag: str, delta_mib: int) -> None:
+    """Attribute an exact, persistent reserved delta to ``tag`` (accumulates)."""
+    _init_ledger[tag] = _init_ledger.get(tag, 0) + int(delta_mib)
+
+
+def _phase_record(tag: str, delta_mib: int) -> None:
+    """Record ``tag``'s worst single-block reserved bump (indicative hi-water)."""
+    if delta_mib > _phase_hi.get(tag, 0):
+        _phase_hi[tag] = int(delta_mib)
+
+
+def _state_suffix(with_context: bool = False) -> str:
     """Absolute state appended to every line.
 
     ``now.*`` = this process's torch pool (excludes the driver CUDA context);
-    ``gpu.*`` = physical board via mem_get_info (all processes, matches
-    nvidia-smi).
+    ``ctx.*``/``procs`` = NVML per-process totals (only when
+    ``with_context``); ``gpu.*`` = physical board via mem_get_info (all
+    processes, matches nvidia-smi).
     """
     a, r = _pool()
     used, free, total = _gpu()
+    ctx = f"| {_context_group()} " if with_context else ""
+    ctx = ctx if ctx.strip() != "|" else ""
     return (
         f"| now.alloc={a} now.reserved={r} "
+        f"{ctx}"
         f"| gpu.used={used} gpu.free={free} gpu.total={total} (MiB)"
     )
 
 
-def _emit(tag: str, kv: dict[str, Any], measured: str) -> None:
+def _emit(
+    tag: str, kv: dict[str, Any], measured: str, with_context: bool = False
+) -> None:
     extra = _format_kv(kv)
     # PID disambiguates the process-local now.* pool: the tokenizer-manager
     # (main) and scheduler (subprocess) both emit VRAM[...] to the same stream.
@@ -123,7 +253,7 @@ def _emit(tag: str, kv: dict[str, Any], measured: str) -> None:
         parts.append(extra)
     if measured:
         parts.append(f"| {measured}")
-    parts.append(_state_suffix())
+    parts.append(_state_suffix(with_context=with_context))
     logger.info(" ".join(parts))
 
 
@@ -133,12 +263,12 @@ def _emit(tag: str, kv: dict[str, Any], measured: str) -> None:
 
 
 def log_static(tag: str, **kv: Any) -> None:
-    """Emit a ``VRAM[<tag>] <kv...> alloc=...MiB reserved=...MiB`` checkpoint."""
+    """Emit a ``VRAM[<tag>] <kv...>`` checkpoint (with NVML context group)."""
     if not enabled():
         return
     try:
         torch.cuda.synchronize()
-        _emit(tag, kv, "")
+        _emit(tag, kv, "", with_context=True)
     except Exception as e:
         logger.warning(f"VRAM[{tag}] log failed: {e}")
 
@@ -146,17 +276,108 @@ def log_static(tag: str, **kv: Any) -> None:
 def log_baseline(tag: str = "baseline", **kv: Any) -> None:
     """Steady-state snapshot at a major milestone (post-init, after weights).
 
-    The physical ``gpu.*`` and torch-pool ``now.*`` groups are already part of
-    every line via the shared suffix, so this is a plain checkpoint that chains
-    with subsequent logs.
+    The physical ``gpu.*``, torch-pool ``now.*`` and NVML ``ctx.*``/``procs``
+    groups are all part of the line, so this is a plain checkpoint that chains
+    with subsequent logs. Also records the reserved watermark used by
+    ``log_budget`` to split init (weights/kv/graph) from runtime growth.
     """
     if not enabled():
         return
     try:
         torch.cuda.synchronize()
-        _emit(tag, kv, "")
+        global _baseline_reserved
+        _baseline_reserved = int(torch.cuda.memory_reserved() / _MiB)
+        _emit(tag, kv, "", with_context=True)
     except Exception as e:
         logger.warning(f"VRAM[{tag}] log failed: {e}")
+
+
+def log_processes(tag: str = "gpu-procs", **kv: Any) -> None:
+    """Snapshot the full NVML compute-process table + this process's context.
+
+    Cheap cross-process board decomposition: emits ``ctx.self`` (this PID's
+    CUDA context) and ``procs=[host_pid:used,...]`` for every process on the
+    GPU. Call at will (e.g. around a peak) to see both contexts at once.
+    """
+    if not enabled():
+        return
+    try:
+        torch.cuda.synchronize()
+        _emit(tag, kv, "", with_context=True)
+    except Exception as e:
+        logger.warning(f"VRAM[{tag}] log failed: {e}")
+
+
+def log_budget(tag: str = "budget", only_on_growth: bool = False, **kv: Any) -> None:
+    """Decompose this process's ``reserved.total`` into named contributors.
+
+    This is the tuning artifact: it answers "where did the reserved MiB go?" so
+    KV-cache size and batch size can be set against the OOM ceiling.
+
+    Layout::
+
+        reserved.total=R = weights=.. + kv-pool=.. + lora-pool=.. \
+                           + init-other=.. + runtime=.. \
+                         | runtime-hi[prefill≤.. heatmap≤.. ..] \
+                         | ctx.self=.. procs=[..] | gpu.used/free/total
+
+    - ``weights``/``kv-pool``/``lora-pool``: exact persistent allocations.
+    - ``init-other``: residual up to the post-init baseline (CUDA-graph capture,
+      fragmentation, misc) — only shown once ``log_baseline`` has run.
+    - ``runtime``: sticky reserved grown *after* baseline = the combined
+      transient working set (prefill/decode/heatmap/vlm-embed share the pool and
+      overlap, so this lump can't be split cleanly).
+    - ``runtime-hi[...]``: *indicative* per-phase worst single-block bump — these
+      overlap, so they do NOT sum to ``runtime``; they rank the phases.
+    - ``ctx.self`` (NVML): the driver CUDA context, on top of ``reserved.total``.
+
+    ``only_on_growth=True`` self-throttles: it returns immediately (no sync/NVML)
+    unless ``reserved`` climbed since the last budget line — so it can be called
+    every iteration in the hot loop and only prints when the ceiling moves.
+    """
+    if not enabled():
+        return
+    global _last_budget_reserved
+    reserved = int(torch.cuda.memory_reserved() / _MiB)
+    if only_on_growth and reserved <= _last_budget_reserved:
+        return
+    _last_budget_reserved = reserved
+    try:
+        torch.cuda.synchronize()
+        reserved = int(torch.cuda.memory_reserved() / _MiB)
+        terms: list[str] = [f"{k}={v}" for k, v in _init_ledger.items()]
+        runtime_hi = ""
+        if _baseline_reserved is not None:
+            init_other = _baseline_reserved - sum(_init_ledger.values())
+            if abs(init_other) >= 1:
+                terms.append(f"init-other={init_other}")
+            terms.append(f"runtime={reserved - _baseline_reserved}")
+            if _phase_hi:
+                ranked = sorted(_phase_hi.items(), key=lambda x: -x[1])
+                runtime_hi = " | runtime-hi[" + " ".join(
+                    f"{k}≤{v}" for k, v in ranked
+                ) + "]"
+        else:
+            # No baseline (e.g. tokenizer process): decompose by phase directly.
+            for k, v in sorted(_phase_hi.items(), key=lambda x: -x[1]):
+                terms.append(f"{k}={v}")
+            other = reserved - sum(_phase_hi.values())
+            if abs(other) >= 1:
+                terms.append(f"other={other}")
+        decomp = " + ".join(terms) if terms else "(nothing attributed yet)"
+        ctx = _context_group()
+        ctx_str = f" | {ctx}" if ctx else ""
+        used, free, total = _gpu()
+        head = " ".join(
+            p for p in [f"VRAM[{tag}]", f"pid={os.getpid()}", _format_kv(kv)] if p
+        )
+        logger.info(
+            f"{head} | reserved.total={reserved} = {decomp}"
+            f"{runtime_hi}{ctx_str} "
+            f"| gpu.used={used} gpu.free={free} gpu.total={total} (MiB)"
+        )
+    except Exception as e:
+        logger.warning(f"VRAM[{tag}] budget failed: {e}")
 
 
 def log_startup(tag: str = "startup", **kv: Any) -> None:
@@ -168,10 +389,13 @@ def log_startup(tag: str = "startup", **kv: Any) -> None:
         return
     logger.info(
         "VRAM[legend] pid=<owner of the now.* pool> | now.*=torch "
-        "caching-allocator pool for THAT process (excludes ~300-700MiB driver "
-        "context; now.reserved is sticky & only grows) | gpu.*=physical board "
-        "via mem_get_info (all processes + contexts, matches nvidia-smi) | "
-        "Δ+=increase during the block"
+        "caching-allocator pool for THAT process (excludes the driver context; "
+        "now.reserved is sticky & only grows) | ctx.self=this PID's CUDA "
+        "context (NVML used − torch reserved) | procs=[host_pid:used] per "
+        "process | gpu.*=physical board via mem_get_info (all processes + "
+        "contexts, matches nvidia-smi) | Δ+=increase during the block | "
+        "VRAM[budget]=reserved.total decomposed into contributors; runtime-hi[] "
+        "is indicative per-phase hi-water (overlaps, does NOT sum)"
     )
     log_baseline(tag, **kv)
 
@@ -206,16 +430,29 @@ def start_peak_tracker(active: bool = True) -> dict[str, Any] | None:
 
 
 def finish_peak_tracker(
-    handle: dict[str, Any] | None, tag: str, **kv: Any
+    handle: dict[str, Any] | None,
+    tag: str,
+    only_on_growth: bool = False,
+    **kv: Any,
 ) -> None:
+    """Emit a per-block peak line and attribute reserved growth to ``tag``.
+
+    ``only_on_growth=True`` suppresses the log line when this block didn't push
+    ``reserved`` any higher (the hot loop's flat repeats) — the phase hi-water
+    is still recorded either way, so the budget stays complete.
+    """
     if handle is None or not enabled():
         return
     try:
         torch.cuda.synchronize()
         peak_alloc = int(torch.cuda.max_memory_allocated() / _MiB)
         peak_reserved = int(torch.cuda.max_memory_reserved() / _MiB)
+        now_reserved = int(torch.cuda.memory_reserved() / _MiB)
         a0 = int(handle["alloc_before"] / _MiB)
         r0 = int(handle["reserved_before"] / _MiB)
+        _phase_record(tag, now_reserved - r0)
+        if only_on_growth and now_reserved <= r0:
+            return
         measured = (
             f"peak.alloc={peak_alloc} (Δ+{max(0, peak_alloc - a0)}) "
             f"peak.reserved={peak_reserved} (Δ+{max(0, peak_reserved - r0)})"
@@ -238,10 +475,15 @@ def start_snapshot_peak() -> dict[str, Any] | None:
 
 
 def finish_snapshot_peak(
-    handle: dict[str, Any] | None, tag: str, **kv: Any
+    handle: dict[str, Any] | None,
+    tag: str,
+    only_on_growth: bool = False,
+    **kv: Any,
 ) -> None:
     """Reports ``peak-contrib`` — how much this block pushed the peak forward
-    (won't disturb an enclosing ``start_peak_tracker``).
+    (won't disturb an enclosing ``start_peak_tracker``). Attributes reserved
+    growth to ``tag``; ``only_on_growth`` suppresses flat repeats (see
+    ``finish_peak_tracker``).
     """
     if handle is None or not enabled():
         return
@@ -249,9 +491,13 @@ def finish_snapshot_peak(
         torch.cuda.synchronize()
         peak_alloc = int(torch.cuda.max_memory_allocated() / _MiB)
         peak_reserved = int(torch.cuda.max_memory_reserved() / _MiB)
+        now_reserved = int(torch.cuda.memory_reserved() / _MiB)
         a0 = int(handle["alloc_before"] / _MiB)
         r0 = int(handle["reserved_before"] / _MiB)
         peak0 = int(handle["peak_before"] / _MiB)
+        _phase_record(tag, now_reserved - r0)
+        if only_on_growth and now_reserved <= r0:
+            return
         measured = (
             f"peak.alloc={peak_alloc} (Δ+{max(0, peak_alloc - a0)}) "
             f"peak.contrib=+{max(0, peak_alloc - peak0)} "
@@ -284,6 +530,7 @@ def finish_alloc_delta(
         reserved_after = int(torch.cuda.memory_reserved() / _MiB)
         a0 = int(handle["alloc_before"] / _MiB)
         r0 = int(handle["reserved_before"] / _MiB)
+        _ledger_add(tag, reserved_after - r0)
         measured = (
             f"delta.alloc={alloc_after - a0:+d} "
             f"delta.reserved={reserved_after - r0:+d}"
@@ -300,21 +547,25 @@ def finish_alloc_delta(
 
 
 @contextmanager
-def peak_tracker(tag: str, active: bool = True, **kv: Any) -> Iterator[None]:
+def peak_tracker(
+    tag: str, active: bool = True, only_on_growth: bool = False, **kv: Any
+) -> Iterator[None]:
     h = start_peak_tracker(active=active)
     try:
         yield
     finally:
-        finish_peak_tracker(h, tag, **kv)
+        finish_peak_tracker(h, tag, only_on_growth=only_on_growth, **kv)
 
 
 @contextmanager
-def snapshot_peak(tag: str, **kv: Any) -> Iterator[None]:
+def snapshot_peak(
+    tag: str, only_on_growth: bool = False, **kv: Any
+) -> Iterator[None]:
     h = start_snapshot_peak()
     try:
         yield
     finally:
-        finish_snapshot_peak(h, tag, **kv)
+        finish_snapshot_peak(h, tag, only_on_growth=only_on_growth, **kv)
 
 
 @contextmanager

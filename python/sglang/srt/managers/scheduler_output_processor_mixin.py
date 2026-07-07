@@ -663,6 +663,7 @@ class SchedulerOutputProcessorMixin:
                 vram_logging.finish_peak_tracker(
                     _vram_h,
                     "heatmap",
+                    only_on_growth=True,
                     input_tokens=len(req_prompt_token_indices),
                     output_tokens=len(req.output_ids),
                     selected_layer_ids=selected_layer_ids,

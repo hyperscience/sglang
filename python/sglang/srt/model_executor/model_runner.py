@@ -808,6 +808,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             tp_size=self.tp_size,
             graph_capture_gb=float(self.graph_mem_usage),
         )
+        vram_logging.log_budget("budget-init")
 
     def init_routed_experts_capturer(self):
         if not self.server_args.disable_shared_experts_fusion and hasattr(

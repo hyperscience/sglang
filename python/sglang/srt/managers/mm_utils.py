@@ -1067,6 +1067,7 @@ def general_mm_embed_routine(
             vram_logging.finish_snapshot_peak(
                 _vlm_h,
                 "vlm-embed",
+                only_on_growth=True,
                 num_reqs=len(mm_inputs_list),
                 num_items=sum(
                     len([it for it in mi.mm_items if it is not None])
