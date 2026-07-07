@@ -6,13 +6,24 @@ when cherry-picking across upstream rebases.
 All logs are gated by the env var ``SGLANG_LOG_VRAM_PEAK`` (default True), and
 emitted via the standard ``logging`` module under the ``sglang.hs.vram`` name.
 
-Every emitted line ends with::
+Line layout
+-----------
+Every line is grouped into labeled sections separated by `` | ``::
 
-    alloc=<absolute MiB> reserved=<absolute MiB>
+    VRAM[<tag>] <kv...> | <event> | now.alloc=A now.reserved=R | gpu.used=U gpu.free=F gpu.total=T (MiB)
 
-so the log chain is self-checking: the "alloc=" of one line must match the
-"alloc-before=" of the next interesting event. A mismatch tells you you
-forgot to log a step in between.
+- ``<event>`` (optional): what this block did — e.g. ``peak.alloc=425 (Δ+425)``.
+- ``now.*``  : THIS process's torch caching-allocator pool. Process-local and
+               **excludes** the ~300-700 MiB driver CUDA context (invisible to
+               ``torch.cuda.memory_*``). ``now.reserved`` is sticky — torch
+               caches freed blocks, so it only ever grows within a process.
+- ``gpu.*``  : physical board totals from ``mem_get_info`` — counts *all*
+               processes and *all* contexts (incl. the driver context), so it
+               reconciles with ``nvidia-smi``.
+
+Because ``now.reserved`` excludes the driver context, ``gpu.used`` is always
+larger than the sum of every process's ``now.reserved``; the difference is the
+per-process CUDA contexts plus driver/ECC reserve.
 
 Public API
 ----------
@@ -40,6 +51,7 @@ Each tag becomes ``VRAM[<tag>]`` in the log line.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -70,21 +82,48 @@ def _format_kv(kv: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _absolute_suffix() -> str:
-    """Always-on absolute state suffix appended to every log line."""
-    alloc = torch.cuda.memory_allocated()
-    reserved = torch.cuda.memory_reserved()
-    return f"alloc={int(alloc / _MiB)}MiB reserved={int(reserved / _MiB)}MiB"
+def _pool() -> tuple[int, int]:
+    """This process's torch caching-allocator pool (MiB): (alloc, reserved)."""
+    return (
+        int(torch.cuda.memory_allocated() / _MiB),
+        int(torch.cuda.memory_reserved() / _MiB),
+    )
+
+
+def _gpu() -> tuple[int, int, int]:
+    """Physical board totals (MiB): (used, free, total) from mem_get_info."""
+    free, total = torch.cuda.mem_get_info()
+    free_mib = int(free / _MiB)
+    total_mib = int(total / _MiB)
+    return (total_mib - free_mib, free_mib, total_mib)
+
+
+def _state_suffix() -> str:
+    """Absolute state appended to every line.
+
+    ``now.*`` = this process's torch pool (excludes the driver CUDA context);
+    ``gpu.*`` = physical board via mem_get_info (all processes, matches
+    nvidia-smi).
+    """
+    a, r = _pool()
+    used, free, total = _gpu()
+    return (
+        f"| now.alloc={a} now.reserved={r} "
+        f"| gpu.used={used} gpu.free={free} gpu.total={total} (MiB)"
+    )
 
 
 def _emit(tag: str, kv: dict[str, Any], measured: str) -> None:
     extra = _format_kv(kv)
-    parts = [f"VRAM[{tag}]"]
+    # PID disambiguates the process-local now.* pool: the tokenizer-manager
+    # (main) and scheduler (subprocess) both emit VRAM[...] to the same stream.
+    # Not cached — the module may be imported before a fork.
+    parts = [f"VRAM[{tag}]", f"pid={os.getpid()}"]
     if extra:
         parts.append(extra)
     if measured:
-        parts.append(measured)
-    parts.append(_absolute_suffix())
+        parts.append(f"| {measured}")
+    parts.append(_state_suffix())
     logger.info(" ".join(parts))
 
 
@@ -105,26 +144,35 @@ def log_static(tag: str, **kv: Any) -> None:
 
 
 def log_baseline(tag: str = "baseline", **kv: Any) -> None:
-    """Detailed steady-state snapshot with free/total VRAM.
+    """Steady-state snapshot at a major milestone (post-init, after weights).
 
-    Use at major milestones (post-init, after weights, etc.). Also includes
-    the standard absolute suffix so it chains with subsequent logs.
+    The physical ``gpu.*`` and torch-pool ``now.*`` groups are already part of
+    every line via the shared suffix, so this is a plain checkpoint that chains
+    with subsequent logs.
     """
     if not enabled():
         return
     try:
         torch.cuda.synchronize()
-        free, total = torch.cuda.mem_get_info()
-        measured = f"free={int(free / _MiB)}MiB total={int(total / _MiB)}MiB"
-        _emit(tag, kv, measured)
+        _emit(tag, kv, "")
     except Exception as e:
         logger.warning(f"VRAM[{tag}] log failed: {e}")
 
 
 def log_startup(tag: str = "startup", **kv: Any) -> None:
-    """Emit the very first VRAM log of the process — same content as
-    ``log_baseline`` but distinct tag so it stands out at the top of the log.
+    """Emit the very first VRAM log of the process, preceded by a one-time
+    legend explaining the field groups. Distinct tag so it stands out at the
+    top of the log.
     """
+    if not enabled():
+        return
+    logger.info(
+        "VRAM[legend] pid=<owner of the now.* pool> | now.*=torch "
+        "caching-allocator pool for THAT process (excludes ~300-700MiB driver "
+        "context; now.reserved is sticky & only grows) | gpu.*=physical board "
+        "via mem_get_info (all processes + contexts, matches nvidia-smi) | "
+        "Δ+=increase during the block"
+    )
     log_baseline(tag, **kv)
 
 
@@ -164,15 +212,13 @@ def finish_peak_tracker(
         return
     try:
         torch.cuda.synchronize()
-        peak_alloc = torch.cuda.max_memory_allocated()
-        peak_reserved = torch.cuda.max_memory_reserved()
+        peak_alloc = int(torch.cuda.max_memory_allocated() / _MiB)
+        peak_reserved = int(torch.cuda.max_memory_reserved() / _MiB)
+        a0 = int(handle["alloc_before"] / _MiB)
+        r0 = int(handle["reserved_before"] / _MiB)
         measured = (
-            f"alloc-before={int(handle['alloc_before'] / _MiB)}MiB "
-            f"reserved-before={int(handle['reserved_before'] / _MiB)}MiB "
-            f"peak-alloc={int(peak_alloc / _MiB)}MiB "
-            f"peak-alloc-increase={int(max(0, peak_alloc - handle['alloc_before']) / _MiB)}MiB "
-            f"peak-reserved={int(peak_reserved / _MiB)}MiB "
-            f"peak-reserved-increase={int(max(0, peak_reserved - handle['reserved_before']) / _MiB)}MiB"
+            f"peak.alloc={peak_alloc} (Δ+{max(0, peak_alloc - a0)}) "
+            f"peak.reserved={peak_reserved} (Δ+{max(0, peak_reserved - r0)})"
         )
         _emit(tag, kv, measured)
     except Exception as e:
@@ -201,16 +247,15 @@ def finish_snapshot_peak(
         return
     try:
         torch.cuda.synchronize()
-        peak_alloc = torch.cuda.max_memory_allocated()
-        peak_reserved = torch.cuda.max_memory_reserved()
+        peak_alloc = int(torch.cuda.max_memory_allocated() / _MiB)
+        peak_reserved = int(torch.cuda.max_memory_reserved() / _MiB)
+        a0 = int(handle["alloc_before"] / _MiB)
+        r0 = int(handle["reserved_before"] / _MiB)
+        peak0 = int(handle["peak_before"] / _MiB)
         measured = (
-            f"alloc-before={int(handle['alloc_before'] / _MiB)}MiB "
-            f"reserved-before={int(handle['reserved_before'] / _MiB)}MiB "
-            f"peak-alloc={int(peak_alloc / _MiB)}MiB "
-            f"peak-alloc-increase={int(max(0, peak_alloc - handle['alloc_before']) / _MiB)}MiB "
-            f"peak-contrib={int(max(0, peak_alloc - handle['peak_before']) / _MiB)}MiB "
-            f"peak-reserved={int(peak_reserved / _MiB)}MiB "
-            f"peak-reserved-increase={int(max(0, peak_reserved - handle['reserved_before']) / _MiB)}MiB"
+            f"peak.alloc={peak_alloc} (Δ+{max(0, peak_alloc - a0)}) "
+            f"peak.contrib=+{max(0, peak_alloc - peak0)} "
+            f"peak.reserved={peak_reserved} (Δ+{max(0, peak_reserved - r0)})"
         )
         _emit(tag, kv, measured)
     except Exception as e:
@@ -235,16 +280,15 @@ def finish_alloc_delta(
         return
     try:
         torch.cuda.synchronize()
-        alloc_after = torch.cuda.memory_allocated()
-        reserved_after = torch.cuda.memory_reserved()
+        alloc_after = int(torch.cuda.memory_allocated() / _MiB)
+        reserved_after = int(torch.cuda.memory_reserved() / _MiB)
+        a0 = int(handle["alloc_before"] / _MiB)
+        r0 = int(handle["reserved_before"] / _MiB)
         measured = (
-            f"alloc-before={int(handle['alloc_before'] / _MiB)}MiB "
-            f"reserved-before={int(handle['reserved_before'] / _MiB)}MiB "
-            f"alloc-delta={int((alloc_after - handle['alloc_before']) / _MiB)}MiB "
-            f"reserved-delta={int((reserved_after - handle['reserved_before']) / _MiB)}MiB"
+            f"delta.alloc={alloc_after - a0:+d} "
+            f"delta.reserved={reserved_after - r0:+d}"
         )
-        # _emit will append the absolute alloc=...MiB reserved=...MiB suffix
-        # which equals (alloc_after, reserved_after).
+        # _emit appends the now.*/gpu.* suffix; now.alloc == alloc_after.
         _emit(tag, kv, measured)
     except Exception as e:
         logger.warning(f"VRAM[{tag}] log failed: {e}")
