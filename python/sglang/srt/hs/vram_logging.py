@@ -49,8 +49,12 @@ un-indented and the patches are pure insertions:
                                          (still attributes to the budget).
 - ``start_snapshot_peak()`` / ``finish_snapshot_peak(h, tag, **kv)``
                                        — no peak reset; for nested blocks
-- ``start_alloc_delta()`` / ``finish_alloc_delta(h, tag, **kv)``
+- ``start_alloc_delta()`` / ``finish_alloc_delta(h, tag, net_of_nested=..)``
                                        — persistent buffer allocations
+                                         (weights/kv-pool/mamba-pool/lora-pool);
+                                         ``net_of_nested`` credits only the
+                                         residual when a block wraps other
+                                         tracked allocations (kv-pool ⊃ mamba)
 
 Context-manager variants are also provided for fresh code:
 ``peak_tracker(...)``, ``snapshot_peak(...)``, ``alloc_delta(...)``.
@@ -509,19 +513,38 @@ def finish_snapshot_peak(
 
 
 def start_alloc_delta() -> dict[str, Any] | None:
-    """Snapshot before a persistent allocation block (no peak tracking)."""
+    """Snapshot before a persistent allocation block (no peak tracking).
+
+    Also snapshots the running ledger total so an outer block can record its
+    contribution *net of* any nested ``finish_alloc_delta`` calls (see
+    ``net_of_nested``), avoiding double-counting when e.g. ``kv-pool`` wraps a
+    nested ``mamba-pool``.
+    """
     if not enabled():
         return None
     torch.cuda.synchronize()
     return {
         "alloc_before": torch.cuda.memory_allocated(),
         "reserved_before": torch.cuda.memory_reserved(),
+        "ledger_before": sum(_init_ledger.values()),
     }
 
 
 def finish_alloc_delta(
-    handle: dict[str, Any] | None, tag: str, **kv: Any
+    handle: dict[str, Any] | None,
+    tag: str,
+    net_of_nested: bool = False,
+    **kv: Any,
 ) -> None:
+    """Attribute a persistent reserved delta to ``tag`` in the budget ledger.
+
+    ``net_of_nested=True``: this block wraps other tracked allocations that
+    already recorded their own ledger entries (e.g. ``kv-pool`` wraps
+    ``mamba-pool``). The ledger gets ``delta − nested`` so the sub-components
+    and this residual sum to the true total without overlap. The logged
+    ``delta.*`` still shows the full measured delta; ``ledger`` annotates the
+    net figure when they differ.
+    """
     if handle is None or not enabled():
         return
     try:
@@ -530,11 +553,18 @@ def finish_alloc_delta(
         reserved_after = int(torch.cuda.memory_reserved() / _MiB)
         a0 = int(handle["alloc_before"] / _MiB)
         r0 = int(handle["reserved_before"] / _MiB)
-        _ledger_add(tag, reserved_after - r0)
+        delta_reserved = reserved_after - r0
+        nested = 0
+        if net_of_nested:
+            nested = sum(_init_ledger.values()) - handle.get("ledger_before", 0)
+        ledger_val = delta_reserved - nested
+        _ledger_add(tag, ledger_val)
         measured = (
             f"delta.alloc={alloc_after - a0:+d} "
-            f"delta.reserved={reserved_after - r0:+d}"
+            f"delta.reserved={delta_reserved:+d}"
         )
+        if nested:
+            measured += f" ledger={ledger_val:+d} (net of nested {nested})"
         # _emit appends the now.*/gpu.* suffix; now.alloc == alloc_after.
         _emit(tag, kv, measured)
     except Exception as e:

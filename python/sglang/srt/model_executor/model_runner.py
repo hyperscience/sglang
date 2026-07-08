@@ -740,7 +740,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # Init memory pool and attention backends
         _vram_h = vram_logging.start_alloc_delta()
         self.init_memory_pool(pre_model_load_memory)
-        vram_logging.finish_alloc_delta(_vram_h, "kv-pool")
+        # net_of_nested: the pool init nests a tracked `mamba-pool` allocation
+        # (hybrid SSM models); credit only the KV residual so the budget's
+        # kv-pool + mamba-pool don't double-count.
+        vram_logging.finish_alloc_delta(_vram_h, "kv-pool", net_of_nested=True)
 
         # Init ngram embedding token table
         self.maybe_init_ngram_embedding()
