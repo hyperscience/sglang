@@ -76,6 +76,14 @@ from sglang.srt.environ import envs
 
 logger = logging.getLogger("sglang.hs.vram")
 
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+
 _MiB = 1024 * 1024
 
 
