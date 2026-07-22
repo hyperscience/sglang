@@ -37,6 +37,7 @@ from sglang.srt.configs.qwen3_5 import (
 from sglang.srt.distributed import get_pp_group
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+from sglang.srt.hs.attention_heatmap import AttentionHeatmapQueryRecorderMixin
 
 # Layers - Attention
 from sglang.srt.layers.attention.fla.layernorm_gated import RMSNorm as RMSNormGated
@@ -840,7 +841,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Full attention forward pass."""
         qkv, _ = self.qkv_proj(hidden_states)
 
@@ -865,7 +866,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             attn_output = attn_output * gate
 
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, q
 
     def forward(
         self,
@@ -886,7 +887,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
 
         if not forward_batch.forward_mode.is_idle():
-            hidden_states = self.self_attention(
+            hidden_states, q = self.self_attention(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
@@ -923,7 +924,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 hidden_states, residual, forward_batch
             )
 
-        return hidden_states, residual
+        return hidden_states, residual, q
 
 
 ALL_DECODER_LAYER_TYPES = {
@@ -932,7 +933,7 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
-class Qwen3_5ForCausalLM(nn.Module):
+class Qwen3_5ForCausalLM(AttentionHeatmapQueryRecorderMixin, nn.Module):
     """Qwen3.5 Model with support for dense variant."""
 
     packed_modules_mapping = {
@@ -1059,6 +1060,12 @@ class Qwen3_5ForCausalLM(nn.Module):
 
         self.layers_to_capture = []
 
+        self._init_attention_heatmap_query_buffer(
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.hidden_size,
+            torch_dtype=config.torch_dtype,
+        )
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -1101,10 +1108,27 @@ class Qwen3_5ForCausalLM(nn.Module):
         # Pass through decoder layers
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
+            is_full_attention_layer = (
+                self.config.layers_block_type[layer_idx] == "attention"
+            )
             with get_global_expert_distribution_recorder().with_current_layer(
                 layer_idx
             ):
-                hidden_states, residual = layer(
+                if not is_full_attention_layer:
+                    hidden_states, residual = layer(
+                        positions=positions,
+                        hidden_states=hidden_states,
+                        residual=residual,
+                        forward_batch=forward_batch,
+                        captured_last_layer_outputs=(
+                            aux_hidden_states
+                            if getattr(layer, "_is_layer_to_capture", False)
+                            else None
+                        ),
+                    )
+                    continue
+
+                hidden_states, residual, q = layer(
                     positions=positions,
                     hidden_states=hidden_states,
                     residual=residual,
@@ -1115,6 +1139,8 @@ class Qwen3_5ForCausalLM(nn.Module):
                         else None
                     ),
                 )
+
+                self._record_query_for_layer(layer_idx, q, forward_batch)
 
             # Process deepstack embeddings if provided
             if (
