@@ -779,12 +779,11 @@ class ServerArgs:
     # For msProbe
     msprobe_dump_config: Optional[str] = None
 
-    # Attention heatmap layer selection.
-    # List of original model layer ids whose queries are recorded in the
-    # query buffer and used for heatmap computation. None means all layers
-    # (with the caveat that layers without a usable K cache, e.g. linear
-    # attention layers, are skipped by the model).
-    attention_heatmap_layer_ids: Optional[List[int]] = None
+    # Attention heatmap layer range (inclusive start, exclusive end).
+    # Only layers in [start, end) are recorded in the query buffer and used for heatmap computation.
+    # None means all layers.
+    attention_heatmap_layer_start: Optional[int] = None
+    attention_heatmap_layer_end: Optional[int] = None
 
     # Chunk size for attention heatmap computation.
     # Controls how many output tokens are processed at once during attention weight computation.
@@ -4190,23 +4189,23 @@ class ServerArgs:
                     self.preferred_sampling_params
                 )
 
-        # Validate attention heatmap layer ids.
-        if self.attention_heatmap_layer_ids is not None:
-            if not isinstance(self.attention_heatmap_layer_ids, list) or not all(
-                isinstance(x, int) for x in self.attention_heatmap_layer_ids
-            ):
+        # Validate attention heatmap layer range.
+        if self.attention_heatmap_layer_start is not None or self.attention_heatmap_layer_end is not None:
+            if self.attention_heatmap_layer_start is not None and self.attention_heatmap_layer_end is not None:
+                if self.attention_heatmap_layer_start < 0:
+                    raise ValueError("attention_heatmap_layer_start must be >= 0")
+                if self.attention_heatmap_layer_end <= self.attention_heatmap_layer_start:
+                    raise ValueError(
+                        f"attention_heatmap_layer_end ({self.attention_heatmap_layer_end}) must be > "
+                        f"attention_heatmap_layer_start ({self.attention_heatmap_layer_start})"
+                    )
+            elif self.attention_heatmap_layer_start is not None and self.attention_heatmap_layer_end is None:
                 raise ValueError(
-                    "attention_heatmap_layer_ids must be a list of ints"
+                    "attention_heatmap_layer_end must be set when attention_heatmap_layer_start is set"
                 )
-            if any(x < 0 for x in self.attention_heatmap_layer_ids):
+            elif self.attention_heatmap_layer_end is not None and self.attention_heatmap_layer_start is None:
                 raise ValueError(
-                    "attention_heatmap_layer_ids must contain only non-negative ints"
-                )
-            if len(set(self.attention_heatmap_layer_ids)) != len(
-                self.attention_heatmap_layer_ids
-            ):
-                raise ValueError(
-                    "attention_heatmap_layer_ids must not contain duplicates"
+                    "attention_heatmap_layer_start must be set when attention_heatmap_layer_end is set"
                 )
 
     def _handle_debug_utils(self):

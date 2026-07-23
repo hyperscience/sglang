@@ -601,38 +601,14 @@ class SchedulerOutputProcessorMixin:
                     req.req_pool_idx, : len(req.origin_input_ids)
                 ].tolist()
 
-                # Pre-filter the key cache down to the layers whose queries
-                # are in the query buffer. Hybrid (linear + full) pools only
-                # store keys for full-attention layers, so we remap layer ids
-                # via the pool's mapping. Regular pools store keys for every
-                # layer, so the layer id is used as-is.
-                from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
-
-                kvcache = self.token_to_kv_pool_allocator._kvcache
-                # The model owns the canonical list of layer ids whose queries
-                # are recorded in the query buffer (in buffer order).
-                heatmap_model = self.tp_worker.model_runner.model.model
-                selected_layer_ids: list[int] = list(
-                    heatmap_model.attention_heatmap_layer_ids
-                )
-                if isinstance(kvcache, HybridLinearKVPool):
-                    selected_key_cache = [
-                        kvcache.full_kv_pool.k_buffer[
-                            kvcache.full_attention_layer_id_mapping[layer_id]
-                        ]
-                        for layer_id in selected_layer_ids
-                    ]
-                else:
-                    selected_key_cache = [
-                        kvcache.k_buffer[layer_id] for layer_id in selected_layer_ids
-                    ]
-
                 layers_attn_weights = compute_attn_weights_for_request(
-                    selected_key_cache=selected_key_cache,
+                    key_cache_buffer=self.token_to_kv_pool_allocator._kvcache.k_buffer,
                     req_query_buffer=req_query_buffer,
                     req_prompt_token_indices=req_prompt_token_indices,
                     page_size=self.page_size,
                     chunked_attention_heatmap_size=self.server_args.chunked_attention_heatmap_size,
+                    attention_heatmap_layer_start=self.server_args.attention_heatmap_layer_start or 0,
+                    attention_heatmap_layer_end=self.server_args.attention_heatmap_layer_end or len(self.token_to_kv_pool_allocator._kvcache.k_buffer),
                 )
                 flattened_attention_all_tokens = list(
                     map(aggregate_attentions, layers_attn_weights)
@@ -649,7 +625,7 @@ class SchedulerOutputProcessorMixin:
                     f"Compute attention weights, "
                     f"#input-token: {len(req_prompt_token_indices)}, "
                     f"#output-token: {len(req.output_ids)}, "
-                    f"selected-layer-ids: {selected_layer_ids}, "
+                    f"layer-range: [{self.server_args.attention_heatmap_layer_start or 0}, {self.server_args.attention_heatmap_layer_end or len(self.token_to_kv_pool_allocator._kvcache.k_buffer)}), "
                     f"chunk-size: {self.server_args.chunked_attention_heatmap_size}, "
                     f"query-buffer: {int(query_buffer_mb)} MiB, "
                     f"VRAM-alloc-peak-increase: {int(peak_alloc_increase)} MiB, "
