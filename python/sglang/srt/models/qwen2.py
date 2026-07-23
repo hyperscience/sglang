@@ -378,7 +378,36 @@ class Qwen2Model(AttentionHeatmapQueryRecorderMixin, nn.Module):
                 residual,
             )
 
-            self._record_query_for_layer(i, q, forward_batch)
+            # Record attention-heatmap queries INLINE (intentionally not a
+            # per-layer method call): invoking self._record_query_for_layer(...)
+            # from inside the torch.compiled forward loop increased CUDA-graph
+            # capture time by ~1.5x (AML-4595). Body mirrors
+            # AttentionHeatmapQueryRecorderMixin.
+            buffer_idx = self._heatmap_layer_id_to_buffer_idx[i]
+            if buffer_idx is not None:
+                assert not forward_batch.forward_mode.is_mixed(), (
+                    "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
+                )
+                batch_size = forward_batch.batch_size
+                hidden_size = self.query_buffer.shape[-1]
+                assert batch_size <= self.query_buffer.shape[1], (
+                    "Batch size exceeds query buffer capacity."
+                )
+                if forward_batch.forward_mode.is_decode():
+                    # Decode: one new token per request. q: [batch_size, hidden_size]
+                    assert q.ndim == 2 and q.shape == (batch_size, hidden_size)
+                    self.query_buffer[buffer_idx][:batch_size] = q
+                elif forward_batch.forward_mode.is_extend():
+                    # Extend: record each request's last prompt-token query.
+                    # q: [total_extend_tokens, hidden_size]
+                    extend_seq_lens = forward_batch.extend_seq_lens_cpu
+                    assert extend_seq_lens is not None
+                    assert len(extend_seq_lens) == batch_size
+                    assert q.ndim == 2 and q.shape == (sum(extend_seq_lens), hidden_size)
+                    req_last_token_idx = -1
+                    for req_idx, extend_len in enumerate(extend_seq_lens):
+                        req_last_token_idx += extend_len
+                        self.query_buffer[buffer_idx, req_idx] = q[req_last_token_idx]
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(

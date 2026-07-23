@@ -13,11 +13,17 @@ MiB = 1024**2
 
 
 class AttentionHeatmapQueryRecorderMixin:
-    """Records per-layer attention queries into a `query_buffer` for attention
+    """Sets up the per-layer attention-query `query_buffer` used for attention
     heatmap computation.
 
-    Call `_init_attention_heatmap_query_buffer` from the model's __init__, and
-    `_record_query_for_layer` from its forward loop once `q` is available.
+    Call `_init_attention_heatmap_query_buffer` from the model's __init__. It
+    populates `query_buffer` and `_heatmap_layer_id_to_buffer_idx`, which the
+    model's forward loop then uses to record queries.
+
+    NOTE: query recording is deliberately performed INLINE in each model's
+    forward loop rather than via a shared method on this mixin. Calling a method
+    on the torch.compiled module once per layer increased CUDA-graph capture
+    time by ~1.5x (AML-4595), so the recording body is inlined at each call site.
 
     Layer ids are taken verbatim from ``server_args.attention_heatmap_layer_ids``
     (defaulting to all layers).
@@ -45,9 +51,9 @@ class AttentionHeatmapQueryRecorderMixin:
             if server_args.attention_heatmap_layer_ids is not None
             else list(range(num_hidden_layers))
         )
-        # Tuple indexed by layer_id (not a dict) so the lookup in
-        # `_record_query_for_layer` stays constant-foldable under
-        # torch.compile / CUDA graph capture.
+        # Tuple indexed by layer_id (not a dict) so the inline recording lookup
+        # in each model's forward stays constant-foldable under torch.compile /
+        # CUDA graph capture.
         layer_id_to_buffer_idx: list[Optional[int]] = [None] * num_hidden_layers
         for buffer_idx, layer_id in enumerate(self.attention_heatmap_layer_ids):
             layer_id_to_buffer_idx[layer_id] = buffer_idx
@@ -68,49 +74,6 @@ class AttentionHeatmapQueryRecorderMixin:
             persistent=False,
         )
 
-    def _record_query_for_layer(
-        self,
-        layer_id: int,
-        q: torch.Tensor,
-        forward_batch: ForwardBatch,
-    ) -> None:
-        buffer_idx = self._heatmap_layer_id_to_buffer_idx[layer_id]
-        if buffer_idx is None:
-            return
-
-        assert not forward_batch.forward_mode.is_mixed(), (
-            "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
-        )
-
-        batch_size = forward_batch.batch_size
-        hidden_size = self.query_buffer.shape[-1]
-        assert batch_size <= self.query_buffer.shape[1], (
-            "Batch size exceeds query buffer capacity."
-        )
-
-        if forward_batch.forward_mode.is_decode():
-            # Decode mode: one new token per request. Record the query used to
-            # generate that token for each request in the batch.
-            # q: [batch_size, hidden_size]
-            assert q.ndim == 2 and q.shape == (batch_size, hidden_size)
-            self.query_buffer[buffer_idx][:batch_size] = q
-            return
-
-        if forward_batch.forward_mode.is_extend():
-            # Extend mode: prefilling multiple requests together. Record the
-            # query for the last token of each request, since that query will
-            # be used to generate the first output token.
-            # q: [total_extend_tokens, hidden_size]
-            extend_seq_lens = forward_batch.extend_seq_lens_cpu
-            assert extend_seq_lens is not None
-            assert len(extend_seq_lens) == batch_size
-            assert q.ndim == 2 and q.shape == (sum(extend_seq_lens), hidden_size)
-
-            req_last_token_idx = -1
-            for req_idx, extend_len in enumerate(extend_seq_lens):
-                req_last_token_idx += extend_len
-                self.query_buffer[buffer_idx, req_idx] = q[req_last_token_idx]
-
 
 @dataclass
 class RequestOutputTokenQueryBuffer:
@@ -121,7 +84,6 @@ class RequestOutputTokenQueryBuffer:
     queries: list[torch.Tensor] = field(
         default_factory=list
     )  # list[torch.Tensor((num_selected_layers, hidden_size))]]
-
 
 
 OUTPUT_TOKEN_QUERY_BUFFER: dict[str, RequestOutputTokenQueryBuffer] = defaultdict(
