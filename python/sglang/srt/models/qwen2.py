@@ -378,7 +378,31 @@ class Qwen2Model(AttentionHeatmapQueryRecorderMixin, nn.Module):
                 residual,
             )
 
-            self._record_query_for_layer(i, q, forward_batch)
+            # Inlined body of AttentionHeatmapQueryRecorderMixin._record_query_for_layer
+            # to test whether the method-call boundary (vs inline recording) is what
+            # slows CUDA-graph capture. Functionally identical to the mixin method.
+            _buffer_idx = self._heatmap_layer_id_to_buffer_idx[i]
+            if _buffer_idx is not None:
+                assert not forward_batch.forward_mode.is_mixed(), (
+                    "MIXED forward mode, which mixes prefilling and decoding, is not supported for query buffer capture."
+                )
+                _batch_size = forward_batch.batch_size
+                _hidden_size = self.query_buffer.shape[-1]
+                assert _batch_size <= self.query_buffer.shape[1], (
+                    "Batch size exceeds query buffer capacity."
+                )
+                if forward_batch.forward_mode.is_decode():
+                    assert q.ndim == 2 and q.shape == (_batch_size, _hidden_size)
+                    self.query_buffer[_buffer_idx][:_batch_size] = q
+                elif forward_batch.forward_mode.is_extend():
+                    _extend_seq_lens = forward_batch.extend_seq_lens_cpu
+                    assert _extend_seq_lens is not None
+                    assert len(_extend_seq_lens) == _batch_size
+                    assert q.ndim == 2 and q.shape == (sum(_extend_seq_lens), _hidden_size)
+                    _req_last_token_idx = -1
+                    for _req_idx, _extend_len in enumerate(_extend_seq_lens):
+                        _req_last_token_idx += _extend_len
+                        self.query_buffer[_buffer_idx, _req_idx] = q[_req_last_token_idx]
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
