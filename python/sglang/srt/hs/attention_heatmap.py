@@ -26,6 +26,12 @@ class AttentionHeatmapQueryRecorderMixin:
     attention_heatmap_layer_ids: list[int]
     _heatmap_layer_id_to_buffer_idx: tuple[Optional[int], ...]
     query_buffer: torch.Tensor
+    # Plain Python ints cached at init so the compiled recorder path never reads
+    # `self.query_buffer.shape` (a tensor shape read becomes a SymInt under
+    # torch.compile, which inflates inductor's symbolic-shape reasoning and
+    # slows down CUDA-graph capture).
+    _heatmap_hidden_size: int
+    _heatmap_max_batch_size: int
 
     def _init_attention_heatmap_query_buffer(
         self,
@@ -52,6 +58,10 @@ class AttentionHeatmapQueryRecorderMixin:
         for buffer_idx, layer_id in enumerate(self.attention_heatmap_layer_ids):
             layer_id_to_buffer_idx[layer_id] = buffer_idx
         self._heatmap_layer_id_to_buffer_idx = tuple(layer_id_to_buffer_idx)
+
+        # Cache shapes as plain Python ints for use in `_record_query_for_layer`.
+        self._heatmap_hidden_size = hidden_size
+        self._heatmap_max_batch_size = max_batch_size
 
         num_query_buffer_layers = max(len(self.attention_heatmap_layer_ids), 1)
         self.register_buffer(
@@ -83,8 +93,8 @@ class AttentionHeatmapQueryRecorderMixin:
         )
 
         batch_size = forward_batch.batch_size
-        hidden_size = self.query_buffer.shape[-1]
-        assert batch_size <= self.query_buffer.shape[1], (
+        hidden_size = self._heatmap_hidden_size
+        assert batch_size <= self._heatmap_max_batch_size, (
             "Batch size exceeds query buffer capacity."
         )
 
