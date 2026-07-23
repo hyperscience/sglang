@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Iterable, Optional
 
 from dataclasses import dataclass, field
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -27,12 +27,19 @@ class AttentionHeatmapQueryRecorderMixin:
     _heatmap_layer_id_to_buffer_idx: tuple[Optional[int], ...]
     query_buffer: torch.Tensor
 
+    # Softmax scaling applied to `Q @ K^T` during heatmap recomputation.
+    # Must match the model's `RadixAttention(scaling=...)`. `None` ⇒
+    # default `head_dim**-0.5` (Qwen). Override in subclasses whose
+    # attention uses a different scaling (e.g. Gemma 4 uses `1.0`).
+    attention_score_scaling: Optional[float] = None
+
     def _init_attention_heatmap_query_buffer(
         self,
         *,
         num_hidden_layers: int,
         hidden_size: int,
         torch_dtype: torch.dtype,
+        valid_layer_ids: Optional[Iterable[int]] = None,
     ) -> None:
         server_args = get_global_server_args()
         max_batch_size: Optional[int] = server_args.max_running_requests
@@ -40,11 +47,28 @@ class AttentionHeatmapQueryRecorderMixin:
             "Expecting max_running_requests to be set for query buffer initialization."
         )
 
-        self.attention_heatmap_layer_ids = (
-            list(server_args.attention_heatmap_layer_ids)
-            if server_args.attention_heatmap_layer_ids is not None
-            else list(range(num_hidden_layers))
+        # Optional per-model restriction (e.g. Gemma 4 only records
+        # full-attention non-KV-shared layers).
+        valid_set: Optional[set[int]] = (
+            set(valid_layer_ids) if valid_layer_ids is not None else None
         )
+        requested = server_args.attention_heatmap_layer_ids
+
+        if requested is not None:
+            requested = list(requested)
+            if valid_set is not None:
+                invalid = [i for i in requested if i not in valid_set]
+                if invalid:
+                    raise ValueError(
+                        f"attention_heatmap_layer_ids contains layer ids "
+                        f"{invalid} that are not supported by this model "
+                        f"(supported ids: {sorted(valid_set)})."
+                    )
+            self.attention_heatmap_layer_ids = requested
+        elif valid_set is not None:
+            self.attention_heatmap_layer_ids = sorted(valid_set)
+        else:
+            self.attention_heatmap_layer_ids = list(range(num_hidden_layers))
         # Tuple indexed by layer_id (not a dict) so the lookup in
         # `_record_query_for_layer` stays constant-foldable under
         # torch.compile / CUDA graph capture.
@@ -220,6 +244,7 @@ def compute_attn_weights_for_request(
     req_prompt_token_indices: list[int],  # indices of prompt tokens in the KV cache
     page_size: int,
     chunked_attention_heatmap_size: Optional[int],
+    attention_score_scaling: Optional[float] = None,
 ) -> list[list[torch.Tensor]]:
     """Compute per-(output-token, prompt-token) attention weights for each
     layer recorded in the query buffer.
@@ -228,6 +253,10 @@ def compute_attn_weights_for_request(
     model layer as query-buffer slot `buffer_idx`. The caller is
     responsible for filtering / remapping the underlying KV pool (e.g.
     `HybridLinearKVPool` only stores keys for full-attention layers).
+
+    `attention_score_scaling` is the scalar applied to ``Q @ K^T`` before
+    the softmax — pass the model's `RadixAttention(scaling=...)` value
+    (e.g. `1.0` for Gemma 4). `None` defaults to `head_dim**-0.5`.
     """
     assert page_size == 1, "Implemented only for page_size == 1"
 
@@ -246,6 +275,12 @@ def compute_attn_weights_for_request(
         # Prepare Keys [num_prompt_tokens, num_k_heads, head_dim]
         keys_base = selected_key_cache[buffer_idx][req_prompt_token_indices, :, :]
         num_k_heads, head_dim = keys_base.shape[-2:]
+
+        layer_scaling = (
+            attention_score_scaling
+            if attention_score_scaling is not None
+            else head_dim**-0.5
+        )
 
         # Reconstruct Queries [num_output_tokens, num_q_heads, head_dim]
         query_last_dimension = req_query_buffer[0][buffer_idx].shape[-1]
@@ -285,7 +320,7 @@ def compute_attn_weights_for_request(
 
             # [num_q_heads, chunk_len, head_dim] @ [num_q_heads, head_dim, num_prompt_tokens]
             # Result: [num_q_heads, chunk_len, num_prompt_tokens]
-            chunk_scores = torch.bmm(query_chunk, keys_bmm) / (head_dim**0.5)
+            chunk_scores = torch.bmm(query_chunk, keys_bmm) * layer_scaling
 
             # Stable Softmax in float32
             chunk_scores = torch.softmax(chunk_scores, dim=-1)

@@ -602,10 +602,10 @@ class SchedulerOutputProcessorMixin:
                 ].tolist()
 
                 # Pre-filter the key cache down to the layers whose queries
-                # are in the query buffer. Hybrid (linear + full) pools only
-                # store keys for full-attention layers, so we remap layer ids
-                # via the pool's mapping. Regular pools store keys for every
-                # layer, so the layer id is used as-is.
+                # are in the query buffer. `get_key_buffer(layer_id)` is the
+                # polymorphic accessor that handles MHA / MLA / SWA pools.
+                # `HybridLinearKVPool` needs an explicit remap because it
+                # only stores keys for full-attention layers.
                 from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
 
                 kvcache = self.token_to_kv_pool_allocator._kvcache
@@ -624,7 +624,8 @@ class SchedulerOutputProcessorMixin:
                     ]
                 else:
                     selected_key_cache = [
-                        kvcache.k_buffer[layer_id] for layer_id in selected_layer_ids
+                        kvcache.get_key_buffer(layer_id)
+                        for layer_id in selected_layer_ids
                     ]
 
                 layers_attn_weights = compute_attn_weights_for_request(
@@ -633,6 +634,9 @@ class SchedulerOutputProcessorMixin:
                     req_prompt_token_indices=req_prompt_token_indices,
                     page_size=self.page_size,
                     chunked_attention_heatmap_size=self.server_args.chunked_attention_heatmap_size,
+                    attention_score_scaling=getattr(
+                        heatmap_model, "attention_score_scaling", None
+                    ),
                 )
                 flattened_attention_all_tokens = list(
                     map(aggregate_attentions, layers_attn_weights)
