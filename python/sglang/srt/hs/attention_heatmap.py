@@ -92,12 +92,19 @@ class AttentionHeatmapQueryRecorderMixin:
             persistent=False,
         )
 
+    @torch._dynamo.disable
     def _record_query_for_layer(
         self,
         layer_id: int,
         q: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> None:
+        # @torch._dynamo.disable: tracing this per-layer recording into the
+        # compiled forward increased CUDA-graph capture time by ~1.5x
+        # (AML-4595). Running it eager still records the in-place query_buffer
+        # writes under sglang's outer CUDA-graph capture, so behaviour is
+        # unchanged (forward is compiled without fullgraph, so the graph break
+        # is allowed).
         buffer_idx = self._heatmap_layer_id_to_buffer_idx[layer_id]
         if buffer_idx is None:
             return
