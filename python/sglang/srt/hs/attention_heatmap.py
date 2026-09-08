@@ -87,7 +87,7 @@ class AttentionHeatmapQueryRecorderMixin:
                     hidden_size,  # num_q_heads * head_dim
                 ),
                 dtype=torch_dtype,
-                device=torch.cuda.current_device(),
+                device=torch.get_device_module().current_device(),
             ),
             persistent=False,
         )
