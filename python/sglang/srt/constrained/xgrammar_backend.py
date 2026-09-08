@@ -113,7 +113,7 @@ class XGrammarGrammar(BaseGrammarObject):
                 apply_token_bitmask_inplace_cuda(logits, vocab_mask)
             else:
                 apply_token_bitmask_inplace_triton(logits, vocab_mask)
-        elif logits.device.type == "npu":
+        elif logits.device.type in {"npu", "cpu"}:
             apply_token_bitmask_inplace_torch(logits, vocab_mask)
         else:
             raise RuntimeError(f"Unsupported device: {logits.device.type}")
