@@ -17,9 +17,11 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.models.utils import apply_qk_norm
 from sglang.srt.utils import (
+    cpu_has_amx_support,
     get_bool_env_var,
     get_device_capability,
     is_blackwell_supported,
+    is_cpu,
     is_cuda,
     is_hip,
     is_musa,
@@ -37,6 +39,8 @@ _is_musa = is_musa()
 _is_npu = is_npu()
 _is_hip = is_hip()
 _is_xpu = is_xpu()
+_is_cpu = is_cpu()
+_is_cpu_amx_available = cpu_has_amx_support()
 
 if _is_cuda:
     from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
@@ -47,6 +51,11 @@ if _is_cuda:
 
 if _is_musa:
     from flash_attn_interface import flash_attn_varlen_func
+
+if _is_cpu and _is_cpu_amx_available:
+    # Backported from upstream main (VisionAMXAttention): the CPU sgl-kernel registers a
+    # native flash-attention for torch::kCPU.
+    flash_attn_varlen_func = torch.ops.sgl_kernel.flash_attn_varlen_func
 
 if _is_npu:
     import torch_npu
@@ -503,6 +512,65 @@ class VisionFlash4Attention(nn.Module):
         return output
 
 
+class VisionAMXAttention(nn.Module):
+    """Backported from upstream main: vision attention through the CPU sgl-kernel's native
+    flash_attn_varlen_func on AMX hardware, replacing the sdpa fallback whose explicit
+    attention mask forces torch onto the materialized-matrix math path (AML-4837: 75% of
+    CPU teacher-forced scoring time sat in that sdpa call)."""
+
+    def __init__(
+        self,
+        **kwargs,
+    ):
+        if not _is_cpu or not _is_cpu_amx_available:
+            raise Exception(
+                "VisionAMXAttention is only available for cpu with amx support"
+            )
+        super().__init__()
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor | SingletonCache | None,
+        bsz: int,
+        seq_len: int,
+        **kwargs,
+    ) -> torch.Tensor:
+        r"""
+        Args:
+            cu_seqlens: [b]
+        Returns:
+             [b * s, h, head_size]
+        """
+        if cu_seqlens is None:
+            cu_seqlens = _get_cu_seqlens_for_shape(bsz, seq_len, device=q.device)
+        elif isinstance(cu_seqlens, SingletonCache):
+            if cu_seqlens.empty():
+                cu_seqlens.set_data(
+                    _get_cu_seqlens_for_shape(bsz, seq_len, device=q.device)
+                )
+            cu_seqlens = cu_seqlens.get_data()
+
+        cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
+        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+        max_seqlen = seq_lens.max().item()
+
+        output = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            causal=False,
+        )
+
+        return output
+
+
 class VisionFlashInferAttention(nn.Module):
     def __init__(
         self,
@@ -738,6 +806,7 @@ QKV_BACKEND_IMPL = {
     "flashinfer_cudnn": VisionFlashInferAttention,
     "ascend_attn": VisionAscendAttention,
     "aiter_attn": VisionAiterAttention,
+    "amx_attn": VisionAMXAttention,
 }
 
 
@@ -940,7 +1009,8 @@ class VisionAttention(nn.Module):
         - CUDA (Hopper SM90): "fa3"
         - CUDA (Blackwell SM100): "fa4"
         - CUDA (other): "triton_attn"
-        - Non-CUDA: "sdpa"
+        - CPU with AMX: "amx_attn"
+        - Non-CUDA otherwise: "sdpa"
         """
         override_backend = get_global_server_args().mm_attention_backend
         if override_backend is not None:
@@ -967,6 +1037,8 @@ class VisionAttention(nn.Module):
                 backend = "triton_attn"
         elif _is_xpu:
             backend = "triton_attn"
+        elif _is_cpu and _is_cpu_amx_available:
+            backend = "amx_attn"
         else:
             backend = "sdpa"
         if backend == "fa3" and is_blackwell_supported():
