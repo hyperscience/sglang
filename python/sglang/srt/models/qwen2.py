@@ -329,9 +329,12 @@ class Qwen2Model(AttentionHeatmapQueryRecorderMixin, nn.Module):
         # For EAGLE3 support
         self.layers_to_capture = []
 
+        head_dim = getattr(config, "head_dim", None) or (
+            config.hidden_size // config.num_attention_heads
+        )
         self._init_attention_heatmap_query_buffer(
             num_hidden_layers=config.num_hidden_layers,
-            hidden_size=config.hidden_size,
+            hidden_size=config.num_attention_heads * head_dim,
             torch_dtype=config.torch_dtype,
         )
 

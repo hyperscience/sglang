@@ -1062,8 +1062,9 @@ class Qwen3_5ForCausalLM(AttentionHeatmapQueryRecorderMixin, nn.Module):
 
         self._init_attention_heatmap_query_buffer(
             num_hidden_layers=config.num_hidden_layers,
-            hidden_size=config.hidden_size,
+            hidden_size=config.num_attention_heads * config.head_dim,
             torch_dtype=config.torch_dtype,
+            valid_layer_ids=config.full_attention_layer_ids,
         )
 
     def get_input_embeddings(self):
