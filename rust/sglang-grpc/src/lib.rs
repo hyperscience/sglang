@@ -39,7 +39,7 @@ impl GrpcServerHandle {
 ///
 /// Returns a `GrpcServerHandle` that can be used to shut the server down.
 #[pyfunction]
-fn start_server(host: String, port: u16, runtime_handle: PyObject) -> PyResult<GrpcServerHandle> {
+fn start_server(host: String, port: u16, runtime_handle: Py<PyAny>) -> PyResult<GrpcServerHandle> {
     let _ = &runtime_handle; // Will be used in Phase 1 PR 2
     let shutdown = Arc::new(Notify::new());
     let shutdown_clone = shutdown.clone();
