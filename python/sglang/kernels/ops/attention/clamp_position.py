@@ -7,7 +7,6 @@ import torch
 from sglang.kernels.fused_op import BaseFusedOp, register_fused_op
 from sglang.kernels.jit.utils import cache_once, load_jit, make_cpp_args
 from sglang.kernels.spec import (
-    CapabilityRequirement,
     FormatSignature,
     KernelBackend,
 )
@@ -46,11 +45,10 @@ class ClampPositionOp(BaseFusedOp):
 
     op = "attention.clamp_position"
     priority = (KernelBackend.JIT, KernelBackend.TORCH)
-    capabilities = {
-        KernelBackend.JIT: frozenset(
-            {CapabilityRequirement.CUDA, CapabilityRequirement.HIP}
-        )
-    }
+    # HS (AML-4240 / AML-4268): the JIT backend is not declared, so dispatch
+    # always resolves to forward_native. The JIT kernel compiles with nvcc at
+    # runtime and our GPU runtime images ship no compiler.
+    capabilities = {}
     format_signature = FormatSignature(
         supported_dtypes=("int32", "int64"),
         description="clamp(seq_lens - 1, min=0); returns int64 positions",
