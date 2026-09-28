@@ -200,6 +200,15 @@ def run_resolution_pipeline(server_args: Any) -> None:
     run_hook(handle_dwdp, server_args)
 
     run_hook(handle_cuda_graph_config, server_args)
+    # HS: attention heatmap. Right after the CUDA-graph config is parsed so the
+    # memory budgeting below sees prefill CUDA graph disabled.
+    from sglang.srt.arg_groups.hs_attention_heatmap_hook import (
+        disable_prefill_cuda_graph_for_attention_heatmap,
+        validate_attention_heatmap_args,
+    )
+
+    run_hook(validate_attention_heatmap_args, server_args)
+    run_hook(disable_prefill_cuda_graph_for_attention_heatmap, server_args)
     # Requires the parsed backend and explicit-input locks, and must precede
     # handle_gpu_memory_settings so the chunk size feeds memory budgeting.
     run_hook(apply_glm5_chunked_prefill_default, server_args)
@@ -323,6 +332,13 @@ def run_resolution_pipeline(server_args: Any) -> None:
     from sglang.srt.arg_groups.speculative_hook import handle_speculative_decoding
 
     run_hook(handle_speculative_decoding, server_args)
+
+    # HS: after the speculative hook so speculative_algorithm is final.
+    from sglang.srt.arg_groups.hs_attention_heatmap_hook import (
+        reject_speculative_decoding_for_attention_heatmap,
+    )
+
+    run_hook(reject_speculative_decoding_for_attention_heatmap, server_args)
 
     # After the speculative hook so speculative_algorithm is final.
     from sglang.srt.arg_groups.layernorm_sp_hook import handle_layernorm_sp

@@ -109,6 +109,7 @@ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_r
 from sglang.srt.hardware_backend.mlx.runtime import use_mlx
 from sglang.srt.hs.attention_heatmap import (
     maybe_drop_extra_query_due_to_overlap_scheduling,
+    validate_attention_heatmap_request,
 )
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.layers.moe import initialize_moe_config
@@ -2886,6 +2887,16 @@ class Scheduler(
             self.init_req_max_new_tokens(req)
             self._add_request_to_queue(req)
             return
+
+        if req.output_attention_weights:
+            # HS: attention heatmap needs prefill CUDA graph off (see
+            # sglang.srt.hs.attention_heatmap.validate_attention_heatmap_request).
+            error_msg = validate_attention_heatmap_request()
+            if error_msg is not None:
+                req.set_finish_with_abort(error_msg)
+                self.init_req_max_new_tokens(req)
+                self._add_request_to_queue(req)
+                return
 
         if self.spec_algorithm.is_dflash_family():
             error_msg = validate_dflash_request(req, self.enable_overlap)
