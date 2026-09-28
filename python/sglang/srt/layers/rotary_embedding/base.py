@@ -141,7 +141,14 @@ class RotaryEmbedding(BaseFusedOp):
         self._apply_rotary_emb_wrapped = apply_rotary_emb
 
         # XXX (MUSA): Implement sgl_kernel.rotary_embedding support for MUSA backend
-        if self._force_native or _is_musa:
+        # HS (AML-4240 / AML-4268): skip the JIT rope kernels by default; they
+        # compile with nvcc at runtime and our GPU runtime images ship no
+        # compiler. Set SGLANG_ENABLE_JIT_ROPE=1 to use them.
+        if (
+            self._force_native
+            or _is_musa
+            or not get_bool_env_var("SGLANG_ENABLE_JIT_ROPE")
+        ):
             self._forward_method = self.forward_native
             self._apply_rotary_emb_wrapped = torch.compile(
                 dynamic=True,
