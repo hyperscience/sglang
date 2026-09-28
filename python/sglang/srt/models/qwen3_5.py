@@ -43,6 +43,7 @@ from sglang.srt.distributed import get_pp_group
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+from sglang.srt.hs.attention_heatmap import AttentionHeatmapQueryRecorderMixin
 from sglang.srt.layers.attention.mamba.mamba import mamba_v2_sharded_weight_loader
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.dp_attention import (
@@ -1092,6 +1093,9 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
 
 
 class Qwen3_5AttentionDecoderLayer(nn.Module):
+    # HS: set by AttentionHeatmapQueryRecorderMixin for heatmap-selected layers.
+    attention_heatmap_recorder = None
+
     """Qwen3.5 Decoder Layer with Full Attention."""
 
     def __init__(
@@ -1436,6 +1440,8 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             forward_batch=forward_batch,
         )
 
+        if self.attention_heatmap_recorder is not None:
+            self.attention_heatmap_recorder(q, forward_batch)
         attn_output = self.attn(q, k, v, forward_batch)
 
         if self.attn_output_gate:
@@ -1547,7 +1553,7 @@ QWEN3_5_KV_SCALE_MAPPER = WeightsMapper(
 )
 
 
-class Qwen3_5ForCausalLM(nn.Module):
+class Qwen3_5ForCausalLM(AttentionHeatmapQueryRecorderMixin, nn.Module):
     """Qwen3.5 Model with support for dense variant."""
 
     decoder_layer_types = ALL_DECODER_LAYER_TYPES
@@ -1709,6 +1715,22 @@ class Qwen3_5ForCausalLM(nn.Module):
             self.norm = PPMissingLayer()
 
         self.layers_to_capture = []
+
+        # HS: attention heatmap query recording (full-attention layers only;
+        # linear-attention layers have no K cache).
+        self._init_attention_heatmap_query_buffer(
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.num_attention_heads * config.head_dim,
+            torch_dtype=config.torch_dtype,
+            valid_layer_ids=config.full_attention_layer_ids,
+        )
+        self._attach_attention_heatmap_recorders(
+            {
+                layer_id: self.layers[layer_id]
+                for layer_id in config.full_attention_layer_ids
+                if self._start_layer <= layer_id < self._end_layer
+            }
+        )
 
     def _build_embed_tokens(self, config: Qwen3_5TextConfig) -> nn.Module:
         """Embedding sharding hook for models reusing this backbone."""
