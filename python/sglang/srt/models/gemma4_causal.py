@@ -34,6 +34,7 @@ from sglang.kernels.ops.layernorm.gemma4_fused_ops import (
 from sglang.srt.distributed import (
     get_pp_group,
 )
+from sglang.srt.hs.attention_heatmap import AttentionHeatmapQueryRecorderMixin
 from sglang.srt.layers.layernorm import Gemma4RMSNorm, RMSNorm
 from sglang.srt.layers.linear import (
     QKVParallelLinear,
@@ -291,6 +292,9 @@ class Gemma4MoE(nn.Module):
 
 
 class Gemma4Attention(nn.Module):
+    # HS: set by AttentionHeatmapQueryRecorderMixin for heatmap-selected layers.
+    attention_heatmap_recorder = None
+
     def __init__(
         self,
         layer_id: int,
@@ -514,6 +518,9 @@ class Gemma4Attention(nn.Module):
             dummy_k = torch.zeros_like(q[:, : self.kv_size])
             q, _ = self.rotary_emb(positions, q, dummy_k)
 
+        # HS: `q` is post-RoPE [tokens, num_heads * head_dim] here.
+        if self.attention_heatmap_recorder is not None:
+            self.attention_heatmap_recorder(q, forward_batch)
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
         attn_output = self.attn(
             q,
@@ -770,7 +777,7 @@ class Gemma4DecoderLayer(nn.Module):
         return hidden_states, None
 
 
-class Gemma4TextModel(PreTrainedModel):
+class Gemma4TextModel(AttentionHeatmapQueryRecorderMixin, PreTrainedModel):
     def __init__(
         self,
         config: Gemma4TextConfig,
@@ -881,6 +888,36 @@ class Gemma4TextModel(PreTrainedModel):
         else:
             self.norm = PPMissingLayer()
         self.layers_to_capture = []
+
+        # HS: attention heatmap query recording is limited to layers with a
+        # complete-prompt key cache: full-attention layers that own their KV
+        # (SWA layers may evict, KV-shared layers reuse another layer's keys).
+        first_kv_shared_layer_idx = config.num_hidden_layers - getattr(
+            config, "num_kv_shared_layers", 0
+        )
+        heatmap_valid_layer_ids = [
+            i
+            for i in range(config.num_hidden_layers)
+            if config.layer_types[i] == "full_attention"
+            and i < first_kv_shared_layer_idx
+        ]
+        self._init_attention_heatmap_query_buffer(
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.num_attention_heads * config.head_dim,
+            torch_dtype=config.torch_dtype,
+            valid_layer_ids=heatmap_valid_layer_ids,
+        )
+        self._attach_attention_heatmap_recorders(
+            {
+                layer_id: self.layers[layer_id].self_attn
+                for layer_id in heatmap_valid_layer_ids
+                if self.start_layer <= layer_id < self.end_layer
+            }
+        )
+        # Mirror `Gemma4Attention.attn`'s `RadixAttention(..., 1, ...)`:
+        # Gemma 4 attention has no `1/sqrt(d_k)` term.
+        self.attention_score_scaling = 1.0
+
         self.post_init()
 
     def get_input_embeddings(self) -> nn.Embedding:
