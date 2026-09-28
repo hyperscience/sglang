@@ -35,8 +35,9 @@ dependencies = [
   "build",
   "compressed-tensors==0.18.0",
   "cuda-python>=13.0",
-  # Transitive dep of flashinfer-python, pinned because 1.6.0rc6 shipped no cp310 linux x86_64 wheel.
-  "cuda-tile==1.6.0rc5",
+  # Transitive dep of flashinfer-python. HS: upstream pins 1.6.0rc5 (sdist only, no cp314 wheel);
+  # 1.6.0 ships cp314 wheels.
+  "cuda-tile>=1.6.0",
   "datasets",
   "decord2 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')",
   "distro",
@@ -60,7 +61,6 @@ dependencies = [
   "nvidia-cutlass-dsl[cu13]==4.6.2",
   "nvidia-mathdx==25.6.0",
   "nvidia-ml-py",
-  "nvshmem4py-cu13",
   "openai>=2.6.1",
   "openai-harmony==0.0.4",
   "orjson",
@@ -79,7 +79,6 @@ dependencies = [
   "scipy",
   "sentencepiece",
   "setproctitle",
-  "sgl-deep-ep==0.1.2",
   "sgl-deep-gemm==0.2.0",
   "sglang-kernel==0.4.7",
   "soundfile==0.13.1",
