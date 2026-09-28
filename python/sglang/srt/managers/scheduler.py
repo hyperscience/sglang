@@ -107,6 +107,9 @@ from sglang.srt.dllm.mixin.scheduler import SchedulerDllmMixin
 from sglang.srt.environ import envs, exportable_env_vars
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+from sglang.srt.hs.attention_heatmap import (
+    maybe_drop_extra_query_due_to_overlap_scheduling,
+)
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.layers.quantization.fp4_utils import initialize_fp4_gemm_config
@@ -2789,6 +2792,7 @@ class Scheduler(
                 dllm_config=self.dllm_config,
                 time_stats=recv_req.time_stats,
                 multi_item_delimiter_indices=recv_req.multi_item_delimiter_indices,
+                output_attention_weights=recv_req.output_attention_weights,
             )
             req.tokenizer = self.tokenizer
 
@@ -4168,6 +4172,11 @@ class Scheduler(
             logger.warning(msg_prefix + msg_details)
 
             for req in retracted_reqs:
+                if req.output_attention_weights:
+                    maybe_drop_extra_query_due_to_overlap_scheduling(
+                        req_rid=req.rid,
+                        req_num_output_tokens=len(req.output_ids),
+                    )
                 self._add_request_to_queue(req, is_retracted=True)
         else:
             self.new_token_ratio_tracker.decay_step()

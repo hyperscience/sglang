@@ -88,6 +88,21 @@ class ExecFeatures(msgspec.Struct):
             choices=["last", "full"],
         ),
     ] = None
+    # HS: attention heatmap (sglang.srt.hs.attention_heatmap).
+    attention_heatmap_layer_ids: A[
+        Optional[List[int]],
+        "Attention heatmap: original model layer ids whose queries are recorded "
+        "for heatmap computation. None means all layers (layers without a usable "
+        "K cache, e.g. linear attention layers, are skipped by the model). "
+        "Setting it disables prefill CUDA graph; it cannot be combined with "
+        "speculative decoding.",
+    ] = None
+    chunked_attention_heatmap_size: A[
+        Optional[int],
+        "Attention heatmap: number of output tokens processed at once when "
+        "computing attention weights. Smaller values reduce peak GPU memory. "
+        "None means all output tokens at once.",
+    ] = None
     enable_return_routed_experts: A[
         bool, "Enable returning routed experts of each layer with responses."
     ] = False

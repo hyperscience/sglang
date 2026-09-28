@@ -61,6 +61,10 @@ if _is_npu:
 
 
 class Qwen3Attention(nn.Module):
+    # HS: set by AttentionHeatmapQueryRecorderMixin (on Qwen2Model) for
+    # heatmap-selected layers.
+    attention_heatmap_recorder = None
+
     def __init__(
         self,
         hidden_size: int,
@@ -302,6 +306,8 @@ class Qwen3Attention(nn.Module):
             q = q.to(torch.bfloat16)
             k = k.to(torch.bfloat16)
 
+        if self.attention_heatmap_recorder is not None:
+            self.attention_heatmap_recorder(q, forward_batch)
         attn_output = self.attn(q, k, v, forward_batch, save_kv_cache=save_kv_cache)
         output, _ = self.o_proj(attn_output)
         return output

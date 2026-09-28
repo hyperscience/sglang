@@ -693,6 +693,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         self.dump_requests_exclude_meta_keys: List[str] = [
             "routed_experts",
             "hidden_states",
+            "attention_weights",
         ]
         self.dump_request_list: List[Tuple] = []
         self.crash_dump_request_list: deque[Tuple] = deque()
@@ -1508,6 +1509,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 return_routed_experts=obj.return_routed_experts,
                 routed_experts_start_len=obj.routed_experts_start_len,
                 return_indexer_topk=obj.return_indexer_topk,
+                output_attention_weights=obj.output_attention_weights,
                 routed_dp_rank=obj.routed_dp_rank,
                 disagg_prefill_dp_rank=obj.disagg_prefill_dp_rank,
                 priority=obj.priority,
@@ -2443,6 +2445,13 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 hidden_states = recv_obj.output_hidden_states[i]
                 if hidden_states is not None:
                     meta_info["hidden_states"] = hidden_states
+            if getattr(recv_obj, "output_attention_weights", None):
+                # HS: attention heatmap, one np.ndarray per output token.
+                attention_weights = unwrap_from_pickle(
+                    recv_obj.output_attention_weights[i]
+                )
+                if attention_weights is not None:
+                    meta_info["attention_weights"] = attention_weights
             if getattr(recv_obj, "routed_experts", None):
                 val = recv_obj.routed_experts[i]
                 if val is not None:

@@ -255,6 +255,8 @@ class GenerateReqInput:
     # 0 = full sequence.
     routed_experts_start_len: int = 0
     return_indexer_topk: bool = False
+    # HS: whether to return the attention heatmap (meta_info["attention_weights"]).
+    output_attention_weights: Union[List[bool], bool] = False
 
     # The modalities of the image data [image, multi-images, video]
     modalities: Optional[List[str]] = None
@@ -925,6 +927,11 @@ class GenerateReqInput:
             return_routed_experts=self.return_routed_experts,
             routed_experts_start_len=self.routed_experts_start_len,
             return_indexer_topk=self.return_indexer_topk,
+            output_attention_weights=(
+                self.output_attention_weights[i]
+                if isinstance(self.output_attention_weights, list)
+                else self.output_attention_weights
+            ),
             modalities=self.modalities[i] if self.modalities else None,
             session_params=self.session_params,
             lora_path=self.lora_path[i] if self.lora_path is not None else None,
@@ -1015,6 +1022,8 @@ class TokenizedGenerateReqInput(BaseReq, kw_only=True):
     # See GenerateReqInput.routed_experts_start_len.
     routed_experts_start_len: int = 0
     return_indexer_topk: bool = False
+    # HS: whether to return the attention heatmap.
+    output_attention_weights: bool = False
 
     # Session info for continual prompting
     session_id: Optional[str] = None
@@ -1484,6 +1493,10 @@ class BatchTokenIDOutput(BaseBatchReq, kw_only=True):
 
     indexer_topk: Optional[List[Optional[torch.Tensor]]]
 
+    # HS: per-request attention heatmap (list of per-output-token np.ndarray over
+    # the prompt tokens), wrapped with wrap_as_pickle for msgpack IPC.
+    output_attention_weights: Optional[List[Any]] = None
+
     # The information of placeholder tokens (e.g., image token)
     # idx is the index of the token in the prompt after expansion.
     # val is the length of padded tokens after expansion.
@@ -1580,6 +1593,9 @@ class BatchStrOutput(BaseBatchReq, kw_only=True):
     routed_experts: Optional[List[Optional[str]]]
 
     indexer_topk: Optional[List[Optional[str]]]
+
+    # HS: see BatchTokenIDOutput.output_attention_weights.
+    output_attention_weights: Optional[List[Any]] = None
 
     # The information of placeholder tokens (e.g., image token)
     # idx is the index of the token in the prompt after expansion.

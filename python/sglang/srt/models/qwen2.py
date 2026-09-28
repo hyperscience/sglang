@@ -26,6 +26,7 @@ from sglang.srt.distributed import (
     get_pp_group,
     get_pp_indices,
 )
+from sglang.srt.hs.attention_heatmap import AttentionHeatmapQueryRecorderMixin
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.dp_attention import is_dp_attention_enabled
 from sglang.srt.layers.layernorm import RMSNorm
@@ -123,6 +124,9 @@ class Qwen2MLP(nn.Module):
 
 
 class Qwen2Attention(nn.Module):
+    # HS: set by AttentionHeatmapQueryRecorderMixin for heatmap-selected layers.
+    attention_heatmap_recorder = None
+
     def __init__(
         self,
         hidden_size: int,
@@ -207,6 +211,8 @@ class Qwen2Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        if self.attention_heatmap_recorder is not None:
+            self.attention_heatmap_recorder(q, forward_batch)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
@@ -311,7 +317,7 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class Qwen2Model(nn.Module):
+class Qwen2Model(AttentionHeatmapQueryRecorderMixin, nn.Module):
     def __init__(
         self,
         config: Qwen2Config,
@@ -382,6 +388,22 @@ class Qwen2Model(nn.Module):
 
         # For EAGLE3 support
         self.layers_to_capture = []
+
+        # HS: attention heatmap query recording.
+        head_dim = getattr(config, "head_dim", None) or (
+            config.hidden_size // config.num_attention_heads
+        )
+        self._init_attention_heatmap_query_buffer(
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.num_attention_heads * head_dim,
+            torch_dtype=config.torch_dtype,
+        )
+        self._attach_attention_heatmap_recorders(
+            {
+                layer_id: getattr(self.layers[layer_id], "self_attn", None)
+                for layer_id in range(self.start_layer, self.end_layer)
+            }
+        )
 
     def get_input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
         if hasattr(self.config, "scale_emb"):

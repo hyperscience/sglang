@@ -157,6 +157,9 @@ class SchedulerOutputStreamer:
         return_indexer_topk = any(
             req.return_indexer_topk for req in reqs if req is not skip_req
         )
+        return_attention_weights = any(
+            req.output_attention_weights for req in reqs if req is not skip_req
+        )
         return_sampling_mask = any(
             req.return_sampling_mask for req in reqs if req is not skip_req
         )
@@ -166,6 +169,7 @@ class SchedulerOutputStreamer:
             return_hidden_states=return_hidden_states,
             return_routed_experts=return_routed_experts,
             return_indexer_topk=return_indexer_topk,
+            return_attention_weights=return_attention_weights,
             return_sampling_mask=return_sampling_mask,
             spec_algorithm=self.spec_algorithm,
             disaggregation_mode=self.disaggregation_mode,
@@ -317,6 +321,7 @@ class _GenerationStreamAccumulator:
     return_routed_experts: bool
     return_indexer_topk: bool
     return_sampling_mask: bool = False
+    return_attention_weights: bool = False
     spec_algorithm: Any
     disaggregation_mode: DisaggregationMode
     default_stream_interval: int
@@ -355,6 +360,7 @@ class _GenerationStreamAccumulator:
     output_hidden_states: Optional[list] = None
     routed_experts: Optional[list] = None
     indexer_topk: Optional[list] = None
+    output_attention_weights: Optional[list] = None
     customized_info: dict = field(default_factory=dict)
     beam_search_output: list = field(default_factory=list)
     time_stats: list = field(default_factory=list)
@@ -390,6 +396,8 @@ class _GenerationStreamAccumulator:
             self.routed_experts = []
         if self.return_indexer_topk:
             self.indexer_topk = []
+        if self.return_attention_weights:
+            self.output_attention_weights = []
 
         if self.return_logprob:
             self.input_token_logprobs_val = []
@@ -668,6 +676,13 @@ class _GenerationStreamAccumulator:
             self.indexer_topk.append(
                 req.indexer_topk if req.return_indexer_topk else None
             )
+        if self.return_attention_weights:
+            # HS: set once the request finishes (attention heatmap).
+            self.output_attention_weights.append(
+                wrap_as_pickle(req.attention_weights)
+                if req.output_attention_weights
+                else None
+            )
 
         current_output_len = len(self.output_ids[-1])
         if req.customized_info is not None:
@@ -754,6 +769,7 @@ class _GenerationStreamAccumulator:
             output_hidden_states=self.output_hidden_states,
             routed_experts=self.routed_experts,
             indexer_topk=self.indexer_topk,
+            output_attention_weights=self.output_attention_weights,
             customized_info=(
                 wrap_as_pickle(self.customized_info) if self.customized_info else None
             ),

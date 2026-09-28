@@ -978,6 +978,7 @@ class Req(ReqDllmMixin):
         multi_item_delimiter_indices: Optional[List[int]] = None,
         session_id: Optional[str] = None,
         cache_salt: Optional[str] = None,
+        output_attention_weights: bool = False,
     ):
         # Input and output info
         self.rid = rid
@@ -1224,6 +1225,11 @@ class Req(ReqDllmMixin):
         self.indexer_topk: Optional[torch.Tensor] = (
             None  # cpu tensor: shape (seqlen, num_indexer_layers, index_topk)
         )
+
+        # HS: attention heatmap (sglang.srt.hs.attention_heatmap). Set when the
+        # request finishes: one np.ndarray over the prompt per output token.
+        self.output_attention_weights: bool = output_attention_weights
+        self.attention_weights: Optional[list] = None
         # Customized info
         self.customized_info: Optional[Dict[str, List[Any]]] = None
 

@@ -16,6 +16,10 @@ import torch
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
+from sglang.srt.hs.attention_heatmap import (
+    OUTPUT_TOKEN_QUERY_BUFFER,
+    compute_attention_weights_for_finished_req,
+)
 from sglang.srt.layers.logits_processor import (
     LogitsProcessorOutput,
     SamplingMaskStatus,
@@ -1308,6 +1312,21 @@ class SchedulerBatchResultProcessor:
             self.decode_offload_manager.offload_kv_cache(req)
 
         if req.finished():
+            # HS: attention heatmap, computed while the prompt keys are still
+            # in the KV cache (released below).
+            if req.output_attention_weights:
+                compute_attention_weights_for_finished_req(
+                    req,
+                    heatmap_model=self.model_worker.model_runner.model.model,
+                    kvcache=self.token_to_kv_pool_allocator.get_kvcache(),
+                    req_to_token=self.req_to_token_pool.req_to_token,
+                    page_size=self.token_to_kv_pool_allocator.page_size,
+                    chunked_attention_heatmap_size=(
+                        get_exec().features.chunked_attention_heatmap_size
+                    ),
+                )
+            OUTPUT_TOKEN_QUERY_BUFFER.pop(req.rid, None)
+
             # isinstance narrowing: create_worker may also return plain
             # TpModelWorker-based drafts, which carry no spec-worker hooks.
             if isinstance(self.draft_worker, BaseSpecWorker):
