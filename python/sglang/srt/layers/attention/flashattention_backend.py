@@ -331,7 +331,19 @@ class FlashAttentionBackend(AttentionBackend):
         # num_splits == 0 delegates SplitKV sizing to the selected FA runtime.
         deterministic = get_exec().deterministic.enable_deterministic_inference
         if self._get_fa_runtime_policy is None:
-            self.num_splits = 1 if deterministic else 0
+            # HS (ddb9c6f74): FA3 does not support num_splits=0 with CUDA graph:
+            # the precomputed scheduler_metadata shape can disagree with the
+            # kernel's internal heuristic ("RuntimeError: scheduler_metadata must
+            # have shape (metadata_size)"), so use num_splits=1 when any CUDA
+            # graph phase is enabled. Untested on v0.5.20 (needs an sm90 GPU).
+            from sglang.srt.model_executor.cuda_graph_config import (
+                cuda_graph_fully_disabled,
+            )
+
+            fa3_under_cuda_graph = (
+                self.fa_impl_ver == 3 and not cuda_graph_fully_disabled()
+            )
+            self.num_splits = 1 if deterministic or fa3_under_cuda_graph else 0
             self.decode_num_splits = self.num_splits
             self._decode_uses_static_max_seqlen_k = False
         else:
