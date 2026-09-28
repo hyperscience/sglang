@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sglang-cpu"
-dynamic = ["version"]
+version = "0.5.20+hs0"
 description = "SGLang is a fast serving framework for large language models and vision language models."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,64 +15,7 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
 ]
 
-# Please keep dependency lists in this file sorted alphabetically by package name.
-dependencies = [
-  "aiohttp",
-  "anthropic>=0.20.0",
-  "blobfile==3.0.0",
-  "build",
-  "compressed-tensors",
-  "datasets",
-  "easydict",
-  "einops",
-  "fastapi",
-  "gguf",
-  "intel-openmp; platform_machine == 'x86_64'",
-  "interegular",
-  "IPython",
-  "llguidance>=1.7.6,<2.0.0",
-  "mistral_common>=1.11.5",
-  "modelscope",
-  "msgspec",
-  "ninja",
-  "numpy",
-  "openai==2.6.1",
-  "openai-harmony==0.0.4",
-  "orjson",
-  "outlines",
-  "packaging",
-  "partial_json_parser",
-  "pillow",
-  "prometheus-client>=0.20.0",
-  "psutil",
-  "py-spy",
-  "pybase64",
-  "pydantic",
-  "python-multipart",
-  "pytest",
-  "pyzmq>=25.1.2",
-  "requests",
-  "scipy",
-  "sentencepiece",
-  "setproctitle",
-  "smg-grpc-servicer>=0.9.0",
-  "soundfile==0.13.1",
-  "tabulate",
-  "tiktoken",
-  "timm==1.0.16",
-  "torch==2.12.0",
-  "torchaudio==2.11.0",
-  "torchcodec==0.12.0 ; sys_platform != 'linux' or (sys_platform == 'linux' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')",
-  "torchvision==0.27.0",
-  "tqdm",
-  "transformers==5.12.1",
-  "triton==3.7.0",
-  "uvicorn",
-  "uvloop",
-  "xxhash",
-  "xgrammar==0.2.1",
-  "zstandard",
-]
+dependencies = []
 
 [project.optional-dependencies]
 diffusion = [
