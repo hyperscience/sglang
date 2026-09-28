@@ -22,8 +22,9 @@ Constraints: page_size == 1, no mixed chunked prefill, no speculative decoding
 (the recorder assumes one query per request per forward step), and no prefill
 CUDA graph (the per-request extend loop would be replayed with capture-time
 shapes). The server-arg resolution disables prefill CUDA graph and rejects
-speculative decoding when ``attention_heatmap_layer_ids`` is set
-(``sglang.srt.arg_groups.hs_attention_heatmap_hook``).
+speculative decoding when the heatmap is configured (``attention_heatmap_layer_ids``
+or ``chunked_attention_heatmap_size`` set;
+``sglang.srt.arg_groups.hs_attention_heatmap_hook``).
 """
 
 from __future__ import annotations
@@ -238,13 +239,15 @@ def validate_attention_heatmap_request() -> Optional[str]:
     )
 
     if not check_cuda_graph_backend(Phase.PREFILL, Backend.DISABLED):
-        # Set attention_heatmap_layer_ids (or disable_prefill_cuda_graph) to
-        # turn prefill CUDA graph off; see hs_attention_heatmap_hook.
+        # Safety net: configuring the heatmap already turns prefill CUDA graph
+        # off (hs_attention_heatmap_hook); this fires only for a server started
+        # without any heatmap args whose prefill graph was not auto-disabled.
         return (
             "output_attention_weights requires prefill CUDA graph to be disabled: "
             "a captured prefill graph replays the attention heatmap query "
-            "recorder with capture-time shapes. Set attention_heatmap_layer_ids "
-            "or disable_prefill_cuda_graph=True when starting the server."
+            "recorder with capture-time shapes. Set chunked_attention_heatmap_size "
+            "or attention_heatmap_layer_ids (or disable_prefill_cuda_graph=True) "
+            "when starting the server."
         )
     return None
 

@@ -8,7 +8,9 @@ request:
 - Prefill CUDA graph (breakable by default since v0.5.12) captures the
   recorder's per-request loop over the extend lengths once, at capture time,
   so every replay would record the query of a padding token. Prefill CUDA
-  graph is therefore disabled when attention_heatmap_layer_ids is set.
+  graph is therefore disabled whenever the heatmap is configured, i.e.
+  attention_heatmap_layer_ids or chunked_attention_heatmap_size is set
+  (layer ids may be None, meaning all layers).
 - Speculative decoding verifies several draft tokens per step, discards the
   rejected ones, and runs separate draft-model passes, so the recorded queries
   would not line up with the output tokens. The combination is rejected.
@@ -23,6 +25,16 @@ from sglang.srt.arg_groups.overrides import declare_resolution, resolving_view
 from sglang.srt.model_executor.cuda_graph_config import Backend, Phase, with_phase
 
 logger = logging.getLogger(__name__)
+
+
+def attention_heatmap_configured(cfg: Any) -> bool:
+    """Whether the server is set up to serve attention heatmaps. forms sets
+    chunked_attention_heatmap_size for heatmap models and may leave
+    attention_heatmap_layer_ids as None (all layers)."""
+    return (
+        cfg.attention_heatmap_layer_ids is not None
+        or cfg.chunked_attention_heatmap_size is not None
+    )
 
 
 def validate_attention_heatmap_args(server_args: Any) -> None:
@@ -48,17 +60,21 @@ def disable_prefill_cuda_graph_for_attention_heatmap(server_args: Any) -> None:
     """Runs right after handle_cuda_graph_config, so memory budgeting sees the
     final prefill backend."""
     cfg = resolving_view(server_args)
-    if cfg.attention_heatmap_layer_ids is None:
+    if not attention_heatmap_configured(cfg):
         return
     prefill_backend = cfg.cuda_graph_config.prefill.backend
     if prefill_backend == Backend.DISABLED:
         return
     logger.warning(
-        "Disabling prefill CUDA graph (%s) because attention_heatmap_layer_ids is "
-        "set: the attention heatmap query recorder records one query per request "
+        "Disabling prefill CUDA graph (%s) because the attention heatmap is "
+        "configured (attention_heatmap_layer_ids=%s, "
+        "chunked_attention_heatmap_size=%s): its query recorder records one "
+        "query per request "
         "per prefill step, which a captured prefill graph would replay with "
         "capture-time shapes.",
         prefill_backend,
+        cfg.attention_heatmap_layer_ids,
+        cfg.chunked_attention_heatmap_size,
     )
     declare_resolution(
         server_args,
@@ -72,12 +88,13 @@ def disable_prefill_cuda_graph_for_attention_heatmap(server_args: Any) -> None:
 def reject_speculative_decoding_for_attention_heatmap(server_args: Any) -> None:
     """Runs after handle_speculative_decoding, so speculative_algorithm is final."""
     cfg = resolving_view(server_args)
-    if cfg.attention_heatmap_layer_ids is None or cfg.speculative_algorithm is None:
+    if not attention_heatmap_configured(cfg) or cfg.speculative_algorithm is None:
         return
     # Future direction: compute the heatmap after generation with one extra
     # forward pass over prompt + generated tokens, which would lift this.
     raise ValueError(
-        "Attention heatmap (attention_heatmap_layer_ids) combined with speculative "
+        "Attention heatmap (attention_heatmap_layer_ids / "
+        "chunked_attention_heatmap_size) combined with speculative "
         f"decoding (speculative_algorithm={cfg.speculative_algorithm}) is not "
         "supported yet: the heatmap query recorder assumes one query per request "
         "per step, while speculative decoding verifies several draft tokens per "
