@@ -262,9 +262,18 @@ def maybe_drop_extra_query_due_to_overlap_scheduling(
     assert (
         len(req_buffer.queries) == req_num_output_tokens
         or len(req_buffer.queries) == req_num_output_tokens + 1
+    ), (
+        f"Query buffer out of sync for {req_rid=}: {len(req_buffer.queries)=}, "
+        f"{req_num_output_tokens=}, {req_buffer.last_forward_pass_mode=}"
     )
     if len(req_buffer.queries) == req_num_output_tokens + 1:
         req_buffer.queries.pop()
+    # The buffer now holds exactly one query per output token. A retracted request
+    # is prefilled again next, and that prefill's first chunk must append a new query,
+    # even if the request was retracted right after a prefill (mode EXTEND, where
+    # the next EXTEND would otherwise replace queries[-1]). Harmless for a finished
+    # request, whose buffer is popped right after.
+    req_buffer.last_forward_pass_mode = ForwardMode.DECODE
 
 
 def fill_output_token_query_buffer_for_batch(
@@ -302,7 +311,9 @@ def fill_output_token_query_buffer_for_batch(
                 # Replace the query for the last forward pass, as the pass did not generate any new token.
                 request_query_buffer.queries[-1] = query_buffer[:, req_idx, :].clone()
             elif request_query_buffer.last_forward_pass_mode == ForwardMode.DECODE:
-                # This means the request was retracted during decoding due to lack of KV cache capacity.
+                # This means the request was retracted due to lack of KV cache capacity: either during decoding,
+                # or right after a prefill (maybe_drop_extra_query_due_to_overlap_scheduling resets the mode to
+                # DECODE on retraction, after leaving exactly one query per output token).
                 # Now, we are doing the first prefill forward pass, which may contain both prompt and already decoded tokens.
                 # We keep the existing queries corresponding to the already decoded tokens and append the query
                 # for the current forward pass, which may be generating a new token if there are no more remaining tokens to prefill.
