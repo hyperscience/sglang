@@ -664,6 +664,9 @@ class Envs:
     SGLANG_OPT_UNIFIED_CACHE_FREE_OUT_OF_WINDOW_SLOTS = EnvBool(True)
     # Decode batches between SWA out-of-window evictions.
     SGLANG_SWA_EVICTION_INTERVAL = EnvInt(128)
+    # HS: size hybrid SWA pools by swa_full_tokens_ratio as in 0.5.11, instead of the
+    # tighter SWAChunkCapPoolConfigurator cap. Set False for the upstream behavior.
+    SGLANG_HS_LEGACY_SWA_POOL_SIZING = EnvBool(True)
     # Deprecated: the unified radix tree is the default tree cache now, so the
     # registry no longer reads this. Kept because a few model/arch call sites
     # still assert on it; do not use in new code.
