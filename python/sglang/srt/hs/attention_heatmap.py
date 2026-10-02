@@ -24,7 +24,9 @@ CUDA graph (the per-request extend loop would be replayed with capture-time
 shapes). The server-arg resolution disables prefill CUDA graph and rejects
 speculative decoding when the heatmap is configured (``attention_heatmap_layer_ids``
 or ``chunked_attention_heatmap_size`` set;
-``sglang.srt.arg_groups.hs_attention_heatmap_hook``).
+``sglang.srt.arg_groups.hs_attention_heatmap_hook``). When it is not configured,
+``_init_attention_heatmap_query_buffer`` selects no layers, so models that call it
+unconditionally attach no recorder and the constraints do not apply.
 """
 
 from __future__ import annotations
@@ -93,9 +95,17 @@ class AttentionHeatmapQueryRecorderMixin:
         valid_set: Optional[set[int]] = (
             set(valid_layer_ids) if valid_layer_ids is not None else None
         )
-        requested = get_exec().features.attention_heatmap_layer_ids
+        features = get_exec().features
+        requested = features.attention_heatmap_layer_ids
 
-        if requested is not None:
+        if requested is None and features.chunked_attention_heatmap_size is None:
+            # Heatmap not configured (same test as
+            # hs_attention_heatmap_hook.attention_heatmap_configured): record
+            # nothing, so no attention module gets a recorder. The engine can then
+            # run modes the recorder does not support, e.g. speculative decoding's
+            # TARGET_VERIFY, which forms uses with the heatmap options unset.
+            self.attention_heatmap_layer_ids = []
+        elif requested is not None:
             requested = list(requested)
             out_of_range = [i for i in requested if i >= num_hidden_layers]
             if out_of_range:
@@ -175,6 +185,17 @@ class AttentionHeatmapQueryRecorderMixin:
         # is allowed).
         buffer_idx = self._heatmap_layer_id_to_buffer_idx[layer_id]
         if buffer_idx is None:
+            return
+
+        # Speculative decoding verifies several draft tokens per request per step
+        # (TARGET_VERIFY counts as extend but carries no extend_seq_lens), so there
+        # is no single query to record. Unreachable when the heatmap is configured,
+        # since the server-arg resolution rejects that combination; a recorder can
+        # only see these modes on a model that attaches it unconditionally.
+        if forward_batch.forward_mode in (
+            ForwardMode.TARGET_VERIFY,
+            ForwardMode.DRAFT_EXTEND_V2,
+        ):
             return
 
         assert not forward_batch.forward_mode.is_mixed(), (

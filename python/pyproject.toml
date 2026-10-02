@@ -15,7 +15,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sglang"
-version = "0.5.20+hs3"
+version = "0.5.20+hs4"
 description = "SGLang is a fast serving framework for large language models and vision language models."
 readme = "README.md"
 requires-python = ">=3.10"
