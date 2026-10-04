@@ -525,16 +525,28 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         if _is_cuda or _is_musa:
             # DSA is CUDA-only; import lazily so non-CUDA builds don't pull in
             # deep_gemm and the rest of the sparse-attention stack at import time.
-            from sglang.srt.layers.attention.dsa_backend import (
-                DeepseekSparseAttnBackend,
-            )
-
-            graph_supported_backend_types.append(DeepseekSparseAttnBackend)
-            from sglang.srt.layers.attention.deepseek_v4_backend import (
-                DeepseekV4AttnBackend,
-            )
-
-            graph_supported_backend_types.append(DeepseekV4AttnBackend)
+            # HS: the DSA backend imports deep_gemm at module level, and deep_gemm
+            # asserts a CUDA toolkit (CUDA_HOME, nvcc or /usr/local/cuda) at import
+            # time. Runtime images without the toolkit must still capture draft
+            # graphs for non-DeepSeek drafts, so a failed import only drops the
+            # DeepSeek backends from the supported list.
+            try:
+                from sglang.srt.layers.attention.dsa_backend import (
+                    DeepseekSparseAttnBackend,
+                )
+                from sglang.srt.layers.attention.deepseek_v4_backend import (
+                    DeepseekV4AttnBackend,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "DeepSeek draft attention backends unavailable (%s: %s); "
+                    "draft CUDA graphs are still captured for other backends.",
+                    type(e).__name__,
+                    e,
+                )
+            else:
+                graph_supported_backend_types.append(DeepseekSparseAttnBackend)
+                graph_supported_backend_types.append(DeepseekV4AttnBackend)
         if _is_cuda:
             # FlashMLA is CUDA-only; import lazily so CPU builds don't pull
             # sgl_kernel.flash_mla at import time.
