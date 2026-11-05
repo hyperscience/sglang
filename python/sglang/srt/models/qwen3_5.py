@@ -16,6 +16,7 @@
 
 import logging
 import os
+from contextlib import nullcontext
 from functools import lru_cache
 from typing import Iterable, Optional, Set, Tuple, Union
 
@@ -1736,12 +1737,15 @@ class Qwen3_5ForCausalLM(AttentionHeatmapQueryRecorderMixin, nn.Module):
         """Embedding sharding hook for models reusing this backbone."""
         if not self.pp_group.is_first_rank:
             return PPMissingLayer()
-        return VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            enable_tp=not is_dp_attention_enabled(),
-        )
+        # The MTP draft sets this when the target's embedding will replace its own.
+        on_meta = getattr(config, "build_embed_tokens_on_meta", False)
+        with torch.device("meta") if on_meta else nullcontext():
+            return VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                enable_tp=not is_dp_attention_enabled(),
+            )
 
     def get_input_embeddings(self):
         return self.embed_tokens

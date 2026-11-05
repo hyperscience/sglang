@@ -16,7 +16,7 @@
 
 import copy
 import logging
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -38,6 +38,7 @@ from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import (
     get_model,
     get_parallel,
+    get_server_args,
     get_spec,
 )
 from sglang.srt.utils import add_prefix, get_bool_env_var, is_hip, is_npu
@@ -120,9 +121,16 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
             config.hidden_size, config.rms_norm_eps
         )
         self.pre_fc_norm_hidden = RMSNorm_cls(config.hidden_size, config.rms_norm_eps)
+        # Without PP, EagleWorker.init_lm_head replaces the draft embedding and
+        # lm_head with the target's. Build them on meta so the KV budget check,
+        # which runs before that, does not see two ~2 GB copies. Read the
+        # configured pp_size: draft_pp_context gives the draft a one-rank pp
+        # group, so get_pp_group() reports 1 even when the target is pipelined.
+        shares_embed_and_head = get_server_args().pp_size == 1
         mtp_config = copy.deepcopy(config)
         mtp_config.num_hidden_layers = 1
         mtp_config.full_attention_interval = 1
+        mtp_config.build_embed_tokens_on_meta = shares_embed_and_head
         self.model = Qwen3_5ForCausalLM(
             mtp_config,
             quant_config,
@@ -134,12 +142,13 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=add_prefix("lm_head", prefix),
-                )
+                with torch.device("meta") if shares_embed_and_head else nullcontext():
+                    self.lm_head = ParallelLMHead(
+                        config.vocab_size,
+                        config.hidden_size,
+                        quant_config=quant_config,
+                        prefix=add_prefix("lm_head", prefix),
+                    )
 
         self.logits_processor = LogitsProcessor(config)
 
@@ -333,7 +342,7 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
                 "model.language_model.embed_tokens.weight",
             ):
                 param_name = "model.embed_tokens.weight"
-                if param_name in params_dict:
+                if param_name in params_dict and not params_dict[param_name].is_meta:
                     param = params_dict[param_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader

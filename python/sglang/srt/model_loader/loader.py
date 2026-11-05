@@ -1059,6 +1059,11 @@ class DefaultModelLoader(BaseModelLoader):
         for _, module in model.named_modules():
             quant_method = getattr(module, "quant_method", None)
             if quant_method is not None:
+                # Meta placeholders (e.g. an MTP draft's embedding and lm_head,
+                # replaced by the target's later) have no data to process.
+                params = list(module.parameters(recurse=False))
+                if params and all(p.is_meta for p in params):
+                    continue
                 # When quant methods need to process weights after loading
                 # (for repacking, quantizing, etc), they expect parameters
                 # to be on the global target device. This scope is for the
