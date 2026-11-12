@@ -335,10 +335,10 @@ def run_resolution_pipeline(server_args: Any) -> None:
 
     # HS: after the speculative hook so speculative_algorithm is final.
     from sglang.srt.arg_groups.hs_attention_heatmap_hook import (
-        reject_speculative_decoding_for_attention_heatmap,
+        validate_speculative_decoding_for_attention_heatmap,
     )
 
-    run_hook(reject_speculative_decoding_for_attention_heatmap, server_args)
+    run_hook(validate_speculative_decoding_for_attention_heatmap, server_args)
 
     # After the speculative hook so speculative_algorithm is final.
     from sglang.srt.arg_groups.layernorm_sp_hook import handle_layernorm_sp

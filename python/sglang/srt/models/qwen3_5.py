@@ -1718,12 +1718,14 @@ class Qwen3_5ForCausalLM(AttentionHeatmapQueryRecorderMixin, nn.Module):
         self.layers_to_capture = []
 
         # HS: attention heatmap query recording (full-attention layers only;
-        # linear-attention layers have no K cache).
+        # linear-attention layers have no K cache). The MTP draft head
+        # (is_nextn) produces no output tokens, so it records nothing.
         self._init_attention_heatmap_query_buffer(
             num_hidden_layers=config.num_hidden_layers,
             hidden_size=config.num_attention_heads * config.head_dim,
             torch_dtype=config.torch_dtype,
             valid_layer_ids=config.full_attention_layer_ids,
+            enabled=not is_nextn,
         )
         self._attach_attention_heatmap_recorders(
             {

@@ -11,9 +11,12 @@ request:
   graph is therefore disabled whenever the heatmap is configured, i.e.
   attention_heatmap_layer_ids or chunked_attention_heatmap_size is set
   (layer ids may be None, meaning all layers).
-- Speculative decoding verifies several draft tokens per step, discards the
-  rejected ones, and runs separate draft-model passes, so the recorded queries
-  would not line up with the output tokens. The combination is rejected.
+- Speculative decoding verifies several draft tokens per step and discards the
+  rejected ones. The recorder keeps the query of every verified token and the
+  scheduler keeps the ones of the accepted tokens, which relies on the EAGLE V2
+  verify layout: one contiguous block of verified tokens per request, accepted
+  tokens first (a single draft chain, speculative_eagle_topk == 1). Other
+  speculative setups are rejected.
 """
 
 from __future__ import annotations
@@ -85,18 +88,28 @@ def disable_prefill_cuda_graph_for_attention_heatmap(server_args: Any) -> None:
     )
 
 
-def reject_speculative_decoding_for_attention_heatmap(server_args: Any) -> None:
-    """Runs after handle_speculative_decoding, so speculative_algorithm is final."""
+def validate_speculative_decoding_for_attention_heatmap(server_args: Any) -> None:
+    """Runs after handle_speculative_decoding, so speculative_algorithm is final
+    (NEXTN is resolved to EAGLE by then)."""
     cfg = resolving_view(server_args)
     if not attention_heatmap_configured(cfg) or cfg.speculative_algorithm is None:
         return
-    # Future direction: compute the heatmap after generation with one extra
-    # forward pass over prompt + generated tokens, which would lift this.
+    from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+    algorithm = SpeculativeAlgorithm.from_string(cfg.speculative_algorithm)
+    supported_algorithm = algorithm in (
+        SpeculativeAlgorithm.EAGLE,
+        SpeculativeAlgorithm.EAGLE3,
+    ) and not cfg.enable_multi_layer_eagle
+    topk = cfg.speculative_eagle_topk
+    if supported_algorithm and topk in (None, 1):
+        return
     raise ValueError(
         "Attention heatmap (attention_heatmap_layer_ids / "
-        "chunked_attention_heatmap_size) combined with speculative "
-        f"decoding (speculative_algorithm={cfg.speculative_algorithm}) is not "
-        "supported yet: the heatmap query recorder assumes one query per request "
-        "per step, while speculative decoding verifies several draft tokens per "
-        "step, discards rejected ones, and runs separate draft-model passes."
+        "chunked_attention_heatmap_size) with speculative decoding requires the "
+        "EAGLE V2 worker (speculative_algorithm EAGLE, EAGLE3 or NEXTN, without "
+        "enable_multi_layer_eagle) and a single draft chain "
+        f"(speculative_eagle_topk=1); got speculative_algorithm="
+        f"{cfg.speculative_algorithm}, enable_multi_layer_eagle="
+        f"{cfg.enable_multi_layer_eagle}, speculative_eagle_topk={topk}."
     )

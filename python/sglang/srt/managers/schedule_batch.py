@@ -1230,6 +1230,9 @@ class Req(ReqDllmMixin):
         # request finishes: one np.ndarray over the prompt per output token.
         self.output_attention_weights: bool = output_attention_weights
         self.attention_weights: Optional[list] = None
+        # Host copies of the queries that produced the output tokens so far:
+        # (num_layers, num_tokens, hidden) chunks, one per committed step.
+        self.attention_heatmap_queries: List[torch.Tensor] = []
         # Customized info
         self.customized_info: Optional[Dict[str, List[Any]]] = None
 

@@ -69,7 +69,7 @@ from sglang.srt.eplb.expert_location import (
     set_global_expert_location_metadata,
 )
 from sglang.srt.eplb.expert_location_updater import ExpertLocationUpdater
-from sglang.srt.hs.attention_heatmap import fill_output_token_query_buffer_for_batch
+from sglang.srt.hs.attention_heatmap import snapshot_attention_heatmap_queries
 from sglang.srt.kv_canary.api import install_canary
 from sglang.srt.kv_canary.runner.canary_manager import context_tuple
 from sglang.srt.kv_canary.token_oracle.install import install_token_oracle_from_env
@@ -1689,16 +1689,19 @@ class ModelRunner:
                 )
         output.expert_distribution_metrics = recorder_outputs.get("metrics")
 
-        # HS: keep the heatmap queries recorded during this forward pass for the
-        # requests that asked for the attention heatmap.
+        # HS: hand the heatmap queries recorded during this forward pass to the
+        # scheduler, which keeps the ones of committed tokens on the host.
         if (
             not self.is_draft_worker
             and forward_batch.output_attention_weights
             and any(forward_batch.output_attention_weights)
+            and isinstance(output.logits_output, LogitsProcessorOutput)
         ):
-            fill_output_token_query_buffer_for_batch(
-                query_buffer=self.model.model.query_buffer,
-                forward_batch=forward_batch,
+            output.logits_output.hs_attention_heatmap_queries = (
+                snapshot_attention_heatmap_queries(
+                    query_buffer=self.model.model.query_buffer,
+                    forward_batch=forward_batch,
+                )
             )
 
         no_copy_to_cpu = not get_schedule().disable_overlap_schedule

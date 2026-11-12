@@ -95,7 +95,8 @@ class ExecFeatures(msgspec.Struct):
         "for heatmap computation. None means all layers (layers without a usable "
         "K cache, e.g. linear attention layers, are skipped by the model). "
         "Setting it (or chunked_attention_heatmap_size) disables prefill CUDA "
-        "graph; the heatmap cannot be combined with speculative decoding.",
+        "graph; with speculative decoding it requires EAGLE/EAGLE3/NEXTN with "
+        "speculative_eagle_topk=1.",
     ] = None
     chunked_attention_heatmap_size: A[
         Optional[int],

@@ -17,8 +17,9 @@ import torch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.hs.attention_heatmap import (
-    OUTPUT_TOKEN_QUERY_BUFFER,
+    append_attention_heatmap_queries,
     compute_attention_weights_for_finished_req,
+    host_attention_heatmap_queries,
 )
 from sglang.srt.layers.logits_processor import (
     LogitsProcessorOutput,
@@ -295,6 +296,8 @@ class SchedulerBatchResultProcessor:
             # Move next_token_ids and logprobs to cpu
             next_token_ids = next_token_ids.tolist()
             self.move_logprobs_to_cpu(batch=batch, logits_output=logits_output)
+            # HS: attention heatmap queries of this step (None if not recorded).
+            heatmap_queries = host_attention_heatmap_queries(logits_output)
             self.materialize_sampling_mask_output(batch.reqs, logits_output)
 
             self._validate_pp_skip_output_comm(batch, result)
@@ -360,6 +363,10 @@ class SchedulerBatchResultProcessor:
                     else:
                         # req output_ids are set here
                         req.output_ids.append(next_token_id)
+                        if req.output_attention_weights:
+                            append_attention_heatmap_queries(
+                                req, heatmap_queries, i, num_tokens=1
+                            )
 
                         self._maybe_update_reasoning_tokens(req, next_token_id)
 
@@ -377,6 +384,8 @@ class SchedulerBatchResultProcessor:
                         if sampling_mask_finish_reason is None:
                             self._maybe_collect_routed_experts(req)
                             self._maybe_collect_indexer_topk(req)
+                        # HS: before the prompt keys are released.
+                        self._maybe_compute_attention_heatmap(req)
                         release_kv_cache(
                             req,
                             self.tree_cache,
@@ -950,6 +959,8 @@ class SchedulerBatchResultProcessor:
             logits_output=logits_output,
             next_token_ids=next_token_ids,
         )
+        # HS: attention heatmap queries of this step (None if not recorded).
+        heatmap_queries = host_attention_heatmap_queries(logits_output)
 
         batch_size = batch.batch_size()
         num_generated_tokens = result.get_num_generated_tokens(batch_size)
@@ -1017,6 +1028,12 @@ class SchedulerBatchResultProcessor:
             else:
                 req.output_ids.extend(next_token_id)
                 new_accept_len = len(next_token_id)
+                if req.output_attention_weights:
+                    # Spec decoding: the committed run (drafts + bonus, already
+                    # grammar-truncated) came from the first verify rows.
+                    append_attention_heatmap_queries(
+                        req, heatmap_queries, i, num_tokens=new_accept_len
+                    )
                 self._maybe_update_reasoning_tokens(req, next_token_id)
             req.update_finish_state(new_accept_len)
 
@@ -1257,6 +1274,28 @@ class SchedulerBatchResultProcessor:
             release_kv_cache(req, self.tree_cache, is_insert=False)
         req.time_stats.set_completion_time()
 
+    def _maybe_compute_attention_heatmap(self, req: Req) -> None:
+        """HS: compute `req.attention_weights` for a finished request that asked
+        for the attention heatmap (sglang.srt.hs.attention_heatmap). Must run
+        before the request's KV cache is released."""
+        if not req.output_attention_weights:
+            return
+        # With speculative decoding the model worker is the spec worker; the
+        # heatmap uses the target model and its KV cache.
+        worker = self.model_worker
+        if isinstance(worker, BaseSpecWorker):
+            worker = worker.target_worker
+        compute_attention_weights_for_finished_req(
+            req,
+            heatmap_model=worker.model_runner.model.model,
+            kvcache=self.token_to_kv_pool_allocator.get_kvcache(),
+            req_to_token=self.req_to_token_pool.req_to_token,
+            page_size=self.token_to_kv_pool_allocator.page_size,
+            chunked_attention_heatmap_size=(
+                get_exec().features.chunked_attention_heatmap_size
+            ),
+        )
+
     def _handle_finish_state_updated_req(
         self,
         req: Req,
@@ -1314,18 +1353,7 @@ class SchedulerBatchResultProcessor:
         if req.finished():
             # HS: attention heatmap, computed while the prompt keys are still
             # in the KV cache (released below).
-            if req.output_attention_weights:
-                compute_attention_weights_for_finished_req(
-                    req,
-                    heatmap_model=self.model_worker.model_runner.model.model,
-                    kvcache=self.token_to_kv_pool_allocator.get_kvcache(),
-                    req_to_token=self.req_to_token_pool.req_to_token,
-                    page_size=self.token_to_kv_pool_allocator.page_size,
-                    chunked_attention_heatmap_size=(
-                        get_exec().features.chunked_attention_heatmap_size
-                    ),
-                )
-            OUTPUT_TOKEN_QUERY_BUFFER.pop(req.rid, None)
+            self._maybe_compute_attention_heatmap(req)
 
             # isinstance narrowing: create_worker may also return plain
             # TpModelWorker-based drafts, which carry no spec-worker hooks.

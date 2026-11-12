@@ -163,6 +163,12 @@ class GenerationBatchResult:
             self.logits_output.hidden_states = _async_d2h(
                 self.logits_output.hidden_states
             )
+        # HS: attention heatmap queries (sglang.srt.hs.attention_heatmap) are
+        # kept on the host until the request finishes.
+        if self.logits_output.hs_attention_heatmap_queries is not None:
+            self.logits_output.hs_attention_heatmap_queries = _async_d2h(
+                self.logits_output.hs_attention_heatmap_queries
+            )
         self.next_token_ids = _async_d2h(self.next_token_ids)
 
         if self.accept_lens is not None:
