@@ -64,7 +64,10 @@ MiB = 1024**2
 
 
 def _max_recorded_rows_per_request() -> int:
-    """Query rows one request records in one forward pass: one, or the number of
+    """Used at model init: `_init_attention_heatmap_query_buffer` (sizes
+    `query_buffer`).
+
+    Query rows one request records in one forward pass: one, or the number of
     verified tokens per request with speculative decoding."""
     spec = get_spec()
     for name in ("max_speculative_num_draft_tokens", "speculative_num_draft_tokens"):
@@ -109,7 +112,10 @@ class AttentionHeatmapQueryRecorderMixin:
         valid_layer_ids: Optional[Iterable[int]] = None,
         enabled: bool = True,
     ) -> None:
-        """`enabled=False` records nothing; draft models (e.g. an MTP head built
+        """Used at model init: `__init__` of `Qwen2Model`, `Qwen3_5ForCausalLM`
+        and `Gemma4TextModel`.
+
+        `enabled=False` records nothing; draft models (e.g. an MTP head built
         from the target's model class) pass it, since their forward passes do not
         produce output tokens."""
         max_batch_size: Optional[int] = get_schedule().max_running_requests
@@ -187,7 +193,10 @@ class AttentionHeatmapQueryRecorderMixin:
     def _attach_attention_heatmap_recorders(
         self, attention_modules: Mapping[int, Optional["nn.Module"]]
     ) -> None:
-        """Give the attention module of each selected layer a recorder.
+        """Used at model init: `__init__` of `Qwen2Model`, `Qwen3_5ForCausalLM`
+        and `Gemma4TextModel`, after `_init_attention_heatmap_query_buffer`.
+
+        Give the attention module of each selected layer a recorder.
 
         `attention_modules` maps layer ids to the module that calls
         `self.attention_heatmap_recorder(q, forward_batch)` in its forward (it
@@ -212,6 +221,11 @@ class AttentionHeatmapQueryRecorderMixin:
         q: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> None:
+        """Used in run_batch, inside `ModelRunner.forward`: each selected layer's
+        attention forward (e.g. `Qwen2Attention.forward`) calls it through
+        `attention_heatmap_recorder`, right before `RadixAttention`.
+
+        Writes this layer's query rows into `query_buffer[buffer_idx]`."""
         # @torch._dynamo.disable: tracing this per-layer recording into the
         # compiled forward increased CUDA-graph capture time by ~1.5x
         # (AML-4595). Running it eager still records the in-place query_buffer
@@ -274,7 +288,10 @@ def snapshot_attention_heatmap_queries(
     query_buffer: torch.Tensor,  # (num_layers, max_rows, hidden_size)
     forward_batch: ForwardBatch,
 ) -> Optional[torch.Tensor]:
-    """Copy of the queries recorded during this forward pass, shaped
+    """Used in run_batch: `ModelRunner.forward`, right after the target
+    model's forward pass (stored on `logits_output.hs_attention_heatmap_queries`).
+
+    Copy of the queries recorded during this forward pass, shaped
     (num_layers, batch_size, rows_per_request, hidden_size): one row per request
     in decode and prefill, one per verified token in TARGET_VERIFY. None for
     modes that record nothing.
@@ -299,7 +316,10 @@ def snapshot_attention_heatmap_queries(
 
 
 def host_attention_heatmap_queries(logits_output) -> Optional[torch.Tensor]:
-    """The step's query snapshot on the host. It is already there when
+    """Used in commit: `process_batch_result_prefill` and
+    `process_batch_result_decode` (batch_result_processor.py), once per step.
+
+    The step's query snapshot on the host. It is already there when
     `GenerationBatchResult.copy_to_cpu` ran (overlap scheduling)."""
     queries = getattr(logits_output, "hs_attention_heatmap_queries", None)
     if queries is not None and queries.device.type != "cpu":
@@ -313,7 +333,11 @@ def append_attention_heatmap_queries(
     req_idx: int,
     num_tokens: int,
 ) -> None:
-    """Keep the queries that produced the `num_tokens` tokens just committed to
+    """Used in commit: `process_batch_result_prefill` and
+    `process_batch_result_decode`, per request right after its
+    `output_ids.append` / `output_ids.extend`.
+
+    Keep the queries that produced the `num_tokens` tokens just committed to
     `req` (rows 0..num_tokens-1 of its block)."""
     if num_tokens <= 0:
         return
@@ -330,7 +354,10 @@ def append_attention_heatmap_queries(
 
 
 def trim_attention_heatmap_queries(req: "Req", num_tokens: int) -> None:
-    """Keep the queries of the first `num_tokens` output tokens of `req`."""
+    """Used on retraction: `Scheduler.update_running_batch` (scheduler.py); and
+    at finish: `compute_attention_weights_for_finished_req`.
+
+    Keep the queries of the first `num_tokens` output tokens of `req`."""
     kept: list[torch.Tensor] = []
     total = 0
     for chunk in req.attention_heatmap_queries:
@@ -343,7 +370,10 @@ def trim_attention_heatmap_queries(req: "Req", num_tokens: int) -> None:
 
 
 def validate_attention_heatmap_request() -> Optional[str]:
-    """Error message if a request with output_attention_weights cannot be served
+    """Used at request intake: `Scheduler.handle_generate_request`
+    (scheduler.py), for requests with output_attention_weights.
+
+    Error message if a request with output_attention_weights cannot be served
     by this server, else None."""
     from sglang.srt.model_executor.cuda_graph_config import (
         Backend,
@@ -376,7 +406,10 @@ def compute_attn_weights_for_request(
     chunked_attention_heatmap_size: Optional[int],
     attention_score_scaling: Optional[float] = None,
 ) -> np.ndarray:
-    """Attention of each output token over the prompt tokens, averaged over
+    """Used in commit, when a request finishes:
+    `compute_attention_weights_for_finished_req`.
+
+    Attention of each output token over the prompt tokens, averaged over
     heads and over the selected layers: float16 [num_output_tokens,
     num_prompt_tokens].
 
@@ -483,7 +516,10 @@ def compute_attn_weights_for_request(
 
 
 def select_heatmap_key_cache(kvcache, layer_ids: list[int]) -> list[torch.Tensor]:
-    """Key cache of each layer in `layer_ids`, in that order.
+    """Used in commit, when a request finishes:
+    `compute_attention_weights_for_finished_req`.
+
+    Key cache of each layer in `layer_ids`, in that order.
 
     `get_key_buffer(layer_id)` is the polymorphic accessor that handles MHA /
     MLA / SWA pools. `HybridLinearKVPool` needs an explicit remap because it
@@ -510,7 +546,12 @@ def compute_attention_weights_for_finished_req(
     page_size: int,
     chunked_attention_heatmap_size: Optional[int],
 ) -> None:
-    """Compute `req.attention_weights` (one float16 array over the prompt per
+    """Used in commit, when a request finishes:
+    `BatchResultProcessor._maybe_compute_attention_heatmap`, called from
+    `process_batch_result_prefill` (requests that finish at prefill) and
+    `_handle_finish_state_updated_req` (decode), before `release_kv_cache`.
+
+    Compute `req.attention_weights` (one float16 array over the prompt per
     output token) from the queries kept on the host and the prompt keys still
     in the KV cache. Call before the request's KV cache is freed."""
     start_time = time.perf_counter()
