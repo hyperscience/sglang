@@ -260,6 +260,10 @@ class LogitsProcessorOutput:
     # Scheduler-local output copied alongside the ordinary generation result.
     auxiliary_device_output: Optional[DeviceAuxiliaryOutput] = None
 
+    # HS: attention heatmap queries recorded during this forward pass
+    # (sglang.srt.hs.attention_heatmap.snapshot_attention_heatmap_queries).
+    hs_attention_heatmap_queries: Optional[torch.Tensor] = None
+
 
 @dataclasses.dataclass
 class LogitsMetadata:

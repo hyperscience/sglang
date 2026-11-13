@@ -105,7 +105,7 @@ _OVERRIDABLE_HOOKS: FrozenSet[str] = frozenset(
         "handle_elastic_ep",
         "validate_experimental_sgl_marlin",
         "handle_speculative_decoding",
-        "reject_speculative_decoding_for_attention_heatmap",
+        "validate_speculative_decoding_for_attention_heatmap",
         "handle_layernorm_sp",
         "validate_cutedsl_a2a_token_budget",
         "handle_load_format",

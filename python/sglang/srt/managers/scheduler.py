@@ -108,7 +108,7 @@ from sglang.srt.environ import envs, exportable_env_vars
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.hardware_backend.mlx.runtime import use_mlx
 from sglang.srt.hs.attention_heatmap import (
-    maybe_drop_extra_query_due_to_overlap_scheduling,
+    trim_attention_heatmap_queries,
     validate_attention_heatmap_request,
 )
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
@@ -4184,10 +4184,10 @@ class Scheduler(
 
             for req in retracted_reqs:
                 if req.output_attention_weights:
-                    maybe_drop_extra_query_due_to_overlap_scheduling(
-                        req_rid=req.rid,
-                        req_num_output_tokens=len(req.output_ids),
-                    )
+                    # Queries are kept per committed token, so they already
+                    # match output_ids unless retraction dropped the outputs
+                    # (input_embeds requests restart generation).
+                    trim_attention_heatmap_queries(req, len(req.output_ids))
                 self._add_request_to_queue(req, is_retracted=True)
         else:
             self.new_token_ratio_tracker.decay_step()
